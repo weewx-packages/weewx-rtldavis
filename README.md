@@ -21,7 +21,7 @@ On Debian or Raspberry Pi OS:
 sudo apt install git golang-go build-essential librtlsdr-dev rtl-sdr
 git clone https://github.com/weewx-packages/weewx-rtldavis.git
 cd weewx-rtldavis
-git checkout v0.21.0
+git checkout v0.21.1
 (cd receiver && go build -o ../dist/rtldavis .)
 sudo install -m 755 dist/rtldavis /usr/local/bin/rtldavis
 ```
@@ -29,7 +29,7 @@ sudo install -m 755 dist/rtldavis /usr/local/bin/rtldavis
 Install the driver using the `weectl` from your WeeWX installation:
 
 ```sh
-weectl extension install https://github.com/weewx-packages/weewx-rtldavis/releases/download/v0.21.0/weewx-rtldavis-0.21.0.zip
+weectl extension install https://github.com/weewx-packages/weewx-rtldavis/releases/download/v0.21.1/weewx-rtldavis-0.21.1.zip
 weectl station reconfigure --driver=user.rtldavis
 ```
 

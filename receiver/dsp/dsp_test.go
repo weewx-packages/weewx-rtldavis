@@ -5,6 +5,7 @@ import (
 	"time"
 
 	crand "crypto/rand"
+	"math"
 	"math/cmplx"
 	mrand "math/rand"
 )
@@ -93,9 +94,12 @@ func TestDiscriminate(t *testing.T) {
 	Discriminate(input, output)
 
 	for idx := range output {
-		if output[idx] != expected[idx] {
-			t.Fail()
-		}
+        // Equivalent floating-point expressions can round differently across
+        // architectures. Compare the numerical result, not its exact bits.
+        tolerance := 1e-12 * math.Max(1, math.Abs(expected[idx]))
+        if math.IsNaN(output[idx]) || math.Abs(output[idx]-expected[idx]) > tolerance {
+            t.Errorf("sample %d: got %.17g, want %.17g", idx, output[idx], expected[idx])
+        }
 	}
 
 	t.Logf("%+0.6f\n", output[:8])

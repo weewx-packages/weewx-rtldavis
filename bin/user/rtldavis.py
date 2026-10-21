@@ -76,7 +76,7 @@ def logerr(msg):
     log.error(msg)
 
 DRIVER_NAME = 'Rtldavis'
-DRIVER_VERSION = '0.21.0'
+DRIVER_VERSION = '0.21.1'
 
 weewx.units.obs_group_dict['frequency'] = 'group_frequency'
 weewx.units.USUnits['group_frequency'] = 'hertz'
@@ -685,6 +685,7 @@ class RtldavisConfigurationEditor(weewx.drivers.AbstractConfEditor):
 """
 
 class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
+    """Decode selected transmitters and add reception summaries to archive events."""
 
     NUM_CHAN = 10 # 8 channels, one fake channel (9), one unused channel (0)
     DEFAULT_FREQUENCY = 'EU'
@@ -737,6 +738,12 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
 
 
     def __init__(self, engine, config_dict):
+        """Load the station mapping and start its receiver process.
+
+        Args:
+            engine (weewx.engine.StdEngine|None): WeeWX engine, or None for diagnostics.
+            config_dict (dict): WeeWX configuration containing a Rtldavis section.
+        """
         loginf('driver version is %s' % DRIVER_VERSION)
         self.setup_units_rtld_schema()
 
@@ -937,6 +944,11 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
             self.stats['pct_good_all'] = 100.0 * total_count / total_expected
 
     def new_archive_record(self, event):
+        """Add reception percentages to the event before WeeWX saves its record.
+
+        Args:
+            event (weewx.Event): NEW_ARCHIVE_RECORD event with a mutable record.
+        """
         logdbg("new_archive_record")
         # calculations per archive period
         self._update_summaries()  # calculate summaries
@@ -969,6 +981,11 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
         return 'Rtldavis'
 
     def genLoopPackets(self):
+        """Yield observations until receiver exit or a 150-second data timeout.
+
+        Yields:
+            dict: WeeWX LOOP packets with METRICWX units.
+        """
         packet = dict()
         time_last_received = int(time.time())
         # change the presentation of the FrequencyErrors of the transmitters 

@@ -1,5 +1,10 @@
 # Changes
 
+## 0.21.1
+
+- Compare DSP floating-point results with a numerical tolerance on ARM64.
+- Run native receiver checks on x86-64 and ARM64 in GitHub Actions.
+
 ## 0.21.0
 
 Independent continuation with the Python driver and Go receiver in one repository.
