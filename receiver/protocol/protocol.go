@@ -35,8 +35,8 @@ import (
 	"math"
 	"math/rand"
 
-	"github.com/lheijst/rtldavis/crc"
-	"github.com/lheijst/rtldavis/dsp"
+	"github.com/weewx-packages/weewx-rtldavis/receiver/crc"
+	"github.com/weewx-packages/weewx-rtldavis/receiver/dsp"
 )
 
 var Verbose bool
@@ -44,7 +44,7 @@ var Verbose bool
 func NewPacketConfig(symbolLength int) (cfg dsp.PacketConfig) {
 	return dsp.NewPacketConfig(
 		19200,
-		14,
+		symbolLength,
 		16,
 		80,
 		"1100101110001001",
@@ -203,6 +203,12 @@ func (p *Parser) Parse(pkts []dsp.Packet) (msgs []Message) {
 	seen := make(map[string]bool)
 
 	for _, pkt := range pkts {
+        if len(pkt.Data) != 10 || pkt.Idx < 0 || pkt.Idx + p.Cfg.PreambleLength > len(p.Discriminated) {
+            continue
+        }
+        // Parsing must not reverse the caller's bytes in place. The same
+        // demodulated packet can be inspected or replayed more than once.
+        pkt.Data = append([]byte(nil), pkt.Data...)
 		// Bit order over-the-air is reversed.
 		for idx, b := range pkt.Data {
 			pkt.Data[idx] = SwapBitOrder(b)
@@ -226,7 +232,7 @@ func (p *Parser) Parse(pkts []dsp.Packet) (msgs []Message) {
 		lower := pkt.Idx + 0*p.Cfg.SymbolLength
 		upper := pkt.Idx + 16*p.Cfg.SymbolLength
 		tail := p.Demodulator.Discriminated[lower:upper]
-		stride := lower % p.Cfg.SymbolLength
+		stride := 0
 		count := 0
 		var mean float64
 		var discrim [16]float64

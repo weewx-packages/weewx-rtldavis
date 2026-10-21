@@ -28,46 +28,10 @@
 # For EU frequencies the freqError values are stored in the database in 
 # time slots of two days per transmitter (when activated).
 
-"""
-Collect data from rtldavis  
-see: https://github.com/bemasher/rtldavis
+"""Receive Davis wireless observations from the companion rtldavis process.
 
-Run rtld on a thread and push the output onto a queue.
-
-....
-
-[Rtldavis]
-    # This section is for the rtldavis sdr-rtl USB receiver.
-    cmd = /home/pi/work/bin/rtldavis 
-
-    # Radio frequency to use between USB transceiver and console: US, NZ or EU
-    # US uses 915 MHz, NZ uses 921 MHz and EU uses 868.3 MHz.  Default is EU.
-    transceiver_frequency = EU
-    
-    # Used channels: 0=not present, 1-8)
-    # The channel of the Vantage Vue ISS or Vantage Pro or Pro2 ISS
-    iss_channel = 1
-    # The values below only apply for Vantage Pro or Pro2
-    anemometer_channel = 0
-    leaf_soil_channel  = 0
-    temp_hum_1_channel = 0
-    temp_hum_2_channel = 0
-    # rain bucket type (0: 0.01 inch, 1: 0.2 mm)
-    rain_bucket_type = 1
-    
-    # Print debug messages
-    # 0=no logging; 1=minimum logging; 2=normal logging; 3=detailed logging
-    debug_parse = 0
-    debug_rain  = 0
-    debug_rtld  = 2    # rtldavis logging: 1=inf; 2=(1)+data+chan; 3=(2)+pkt
-
-    # The pct_good per transmitter can be saved to the database
-    # This has only effect with 2 transmitters or more
-    save_pct_good_per_transmitter = False
-
-    # The driver to use:
-    driver = user.rtldavis
-
+See README.md for installation and docs/configuration.md for sensor mapping.
+Raw frames use the protocol documented by the original rtldavis project.
 """
 from __future__ import print_function  # Python 2/3 compatiblity
 from __future__ import with_statement
@@ -181,17 +145,20 @@ LW_MAP = {RAW: (857.0, 864.0, 895.0, 911.0, 940.0, 952.0, 991.0, 1013.0),
 
 
 def calculate_thermistor_temp(temp_raw):
-    """ Decode the raw thermistor temperature, then calculate the actual
-    thermistor temperature and the leaf_soil potential, using Davis' formulas.
-    see: https://github.com/cmatteri/CC1101-Weather-Receiver/wiki/Soil-Moisture-Station-Protocol
-    :param temp_raw: raw value from sensor for leaf wetness and soil moisture
+    """Convert a valid Davis thermistor count to degrees Celsius.
+
+    Args:
+        temp_raw (int|float): Ten-bit thermistor count.
+
+    Returns:
+        float|None: Temperature, or None for an invalid resistance.
     """
 
     # Convert temp_raw to a resistance (R) in kiloOhms
     a = 18.81099
     b = 0.0009988027
     if temp_raw <= 0:
-        return DEFAULT_SOIL_TEMP
+        return None
     r = a / (1.0 / temp_raw - b) / 1000 # k ohms
 
     # Steinhart-Hart parameters
@@ -205,7 +172,7 @@ def calculate_thermistor_temp(temp_raw):
     except ValueError as e:
         logerr('thermistor_temp failed for temp_raw %s r (k ohm) %s'
                'error: %s' % (temp_raw, r, e))
-    return DEFAULT_SOIL_TEMP
+    return None
 
 
 def lookup_potential(sensor_name, norm_fact, sensor_raw, sensor_temp, lookup):
@@ -222,6 +189,8 @@ def lookup_potential(sensor_name, norm_fact, sensor_raw, sensor_temp, lookup):
     """
 
     # normalize raw value for standard temperature (DEFAULT_SOIL_TEMP)
+    if sensor_temp is None:
+        sensor_temp = DEFAULT_SOIL_TEMP
     sensor_raw_norm = sensor_raw * (1 + norm_fact * (sensor_temp - DEFAULT_SOIL_TEMP))
 
     numcols = len(lookup[RAW])
@@ -484,7 +453,9 @@ class ProcManager:
     def pending(self):
         """Return whether stderr can still deliver output after process exit."""
         return (self.running() or not self.stderr_queue.empty()
-                or self.stderr_reader is not None and self.stderr_reader.is_alive())
+                or not self.stdout_queue.empty()
+                or any(reader is not None and reader.is_alive()
+                       for reader in (self.stderr_reader, self.stdout_reader)))
 
     def get_stdout(self):
         lines = []
@@ -510,6 +481,9 @@ class ProcManager:
 
 
 class Packet:
+    """Interface shared by data and frequency diagnostic parsers."""
+
+    IDENTIFIER = re.compile(r"(?!)")
 
     def __init__(self):
         pass
@@ -524,11 +498,11 @@ class DATAPacket(Packet):
     PATTERN = re.compile(r"^(\d{2}):(\d{2}):(\d{2}\.\d{6}) ([0-9A-F]{16}) (\d+) (\d+) (\d+) (\d+)")
 
     @staticmethod
-    def parse_text(self, payload, lines):
+    def parse_text(driver, payload, lines):
         """Decode a CRC-valid frame, rejecting repeated RF decodes per sender.
 
         Args:
-            self (RtldavisDriver): Driver with transmitter and timing state.
+            driver (RtldavisDriver): Driver with transmitter and timing state.
             payload (str): Receiver line without surrounding whitespace.
             lines (list[str]): Pending lines; consumes its first entry.
 
@@ -545,7 +519,7 @@ class DATAPacket(Packet):
             return None
         stamp = int(match.group(1)) * 3600 + int(match.group(2)) * 60 + float(match.group(3))
         channel = (raw_pkt[0] & 7) + 1
-        previous = self._last_frame_time.get(channel)
+        previous = driver._last_frame_time.get(channel)
         # The receiver stamps frames before pipe buffering. Host receipt times
         # would discard valid frames when a buffered batch reaches WeeWX.
         # An ISS needs at least 2.5625 s between transmissions. The 2 s guard
@@ -553,10 +527,10 @@ class DATAPacket(Packet):
         if previous is not None and (stamp - previous) % 86400 < 2:
             logdbg("discarding repeated RF burst from channel %d" % channel)
             return None
-        data = self.parse_readings(raw_pkt)
+        data = driver.parse_readings(raw_pkt)
         if not data:
             return None
-        self._last_frame_time[channel] = stamp
+        driver._last_frame_time[channel] = stamp
         for i in range(4):
             data['curr_cnt%d' % i] = int(match.group(i + 5))
         return data
@@ -565,8 +539,8 @@ class DATAPacket(Packet):
 class CHANNELPacket(Packet):
     IDENTIFIER = re.compile("ChannelIdx:")
     # chan: 13:44:13.116046 Hop: {ChannelIdx:3 ChannelFreq:868437250 FreqError:431 Transmitter:1}
-    PATTERNv13 = re.compile('ChannelIdx:([\d]+) ChannelFreq:([\d]+) FreqError:([\d-]+) Transmitter:([\d]+)')
-    PATTERNv12 = re.compile('ChannelIdx:([\d]+) ChannelFreq:([\d]+) FreqError:([\d-]+)')
+    PATTERNv13 = re.compile(r'ChannelIdx:([\d]+) ChannelFreq:([\d]+) FreqError:([\d-]+) Transmitter:([\d]+)')
+    PATTERNv12 = re.compile(r'ChannelIdx:([\d]+) ChannelFreq:([\d]+) FreqError:([\d-]+)')
 
     @staticmethod
     def parse_text(self, payload, lines):
@@ -675,7 +649,7 @@ class RtldavisConfigurationEditor(weewx.drivers.AbstractConfEditor):
     # -fc = frequency correction for all channels; default = 0
     # -u  = log undefined signals
     #
-    # The options below will autoamically be set
+    # The options below are set from the channel configuration
     # -tf = transmitter frequencies, US, NZ or EU
     # -tr = transmitters: tr1=1,  tr2=2,  tr3=4,  tr4=8, 
     #                     tr5=16, tr6=32, tr7=64, tr8=128
@@ -716,17 +690,13 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
     DEFAULT_FREQUENCY = 'EU'
     DEFAULT_RAIN_BUCKET_TYPE = 1
     DEFAULT_SENSOR_MAP = {
-        'pressure': 'pressure',
-        'inTemp': 'temp_in',  # temperature of optional BMP280 module
         'windSpeed': 'wind_speed',
         'windGust': 'wind_gust',
         'windDir': 'wind_dir',
         'outTemp': 'temperature',
         'outHumidity': 'humidity',
-        'inHumidity': 'humidity_in',
-        # To use a rainRate calculation from this driver that closely matches
-        # that of a Davis station, uncomment the rainRate field then specify
-        # rainRate = hardware in section [StdWXCalculate] of weewx.conf
+        # WeeWX uses this sensor's interval between bucket tips when
+        # rainRate = hardware is selected in [StdWXCalculate].
         'rainRate': 'rain_rate',
         'radiation': 'solar_radiation',
         'UV': 'uv',
@@ -795,7 +765,7 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
         if 'sensor_map' in stn_dict:
             self.sensor_map.update(stn_dict['sensor_map'])
         loginf('sensor map is: %s' % self.sensor_map)
-        self._init_stats()
+        self.stats = self._init_stats()
         self.last_rain_count = None
         self._rain_candidate = None
         self._last_frame_time = {}
@@ -872,6 +842,14 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
         return transmitters, trIdCount
 
     def _data_to_packet(self, data):
+        """Map decoded observations and derive rain without accepting counter jumps.
+
+        Args:
+            data (dict): Raw observations from one accepted transmission.
+
+        Returns:
+            dict: WeeWX LOOP packet. Rain is None for an ambiguous counter change.
+        """
         packet = dict()
         # map sensor observations to database field names
         for k in self.sensor_map:
@@ -879,13 +857,15 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
                 packet[k] = data[self.sensor_map[k]]
         if 'rain_count' in data:
             current = data['rain_count']
-            tips = 0 if self.last_rain_count is None else (current - self.last_rain_count) % 128
+            tips = 0 if self.last_rain_count is None else current - self.last_rain_count
+            if tips < -100:
+                tips += 128
             # A corrupt count must not become the next baseline: that would
             # turn its recovery into a second, equally false rain event.
             # A repeated rejected count establishes a new baseline after a
             # transmitter reset, without counting the ambiguous transition.
-            if tips <= 60 or current == self._rain_candidate:
-                packet['rain'] = (tips if tips <= 60 else 0) * self.rain_per_tip
+            if 0 <= tips <= 60 or current == self._rain_candidate:
+                packet['rain'] = (tips if 0 <= tips <= 60 else 0) * self.rain_per_tip
                 self.last_rain_count = current
                 self._rain_candidate = None
             else:
@@ -897,7 +877,12 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
         return packet
 
     def _init_stats(self):
-        self.stats = {
+        """Create the receiver counters and archive baselines.
+
+        Returns:
+            dict: Counters, active-transmitter indices and reception summaries.
+        """
+        return {
             # theoretical loop times for 8 transmitter channels (plus 100.0 as dummy)
             'loop_times': [2.5625, 2.625, 2.6875, 2.75, 2.8125, 2.875, 2.9375, 3, 100.0],
             'activeTrIds': [9] * 8,    # 9 means: sensor not active
@@ -998,6 +983,8 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
             # init period is EU: 16 s, US, AU and NZ: 133 s
             if int(time.time()) - time_last_received > 150:
                 raise weewx.WeeWxIOError("rtldavis process stalled")
+            for line in self._mgr.get_stdout():
+                logdbg("receiver stdout: %s" % line.rstrip())
             # program main.go writes its data to stderr
             for lines in self._mgr.get_stderr():
                 for data in PacketFactory.create(self, lines):
@@ -1020,13 +1007,21 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
             raise weewx.WeeWxIOError("rtldavis process is not running")
 
     def parse_readings(self, pkt):
+        """Decode one eight-byte payload, without its receiver timestamp or CRC check.
+
+        Args:
+            pkt (bytes|bytearray): Davis payload including its two checksum bytes.
+
+        Returns:
+            dict: Observations in METRICWX units. Empty for an unknown station.
+        """
         data = dict()
         if not pkt or len(pkt) != 8:
             return data
         try:
             data = self.parse_raw(self, pkt)
         except ValueError as e:
-            logerr("parse failed for '%s': %s" % (pkt, e))
+            logerr("parse failed for %r: %s" % (pkt, e))
         return data
 
     @staticmethod
@@ -1186,7 +1181,7 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
                     else:
                         data['temperature'] = temp_c
             elif message_type == 9:
-                # 10-min average wind gust
+                # Stored wind peak reported by the transmitter
                 # message examples:
                 # 91 00 DB 00 03 0E 89 85
                 # 90 00 00 00 05 00 31 51 (no sensor)

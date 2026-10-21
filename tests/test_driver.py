@@ -207,3 +207,29 @@ def test_burst_filter_uses_receiver_time_and_midnight(driver):
     assert decode(driver, frame(), '00:00:01.562500')
     driver.channels['temp_hum_1'] = 2
     assert decode(driver, frame(channel=2), '00:00:01.563000')
+
+
+def test_thermistor_invalid_resistance_is_missing():
+    for raw in (0, -1, 1023.75):
+        assert rtl.calculate_thermistor_temp(raw) is None
+
+
+def test_captured_multi_transmitter_log_has_no_phantom_rain(driver):
+    from pathlib import Path
+    driver.channels['iss'] = driver.channels['wind_channel'] = 2
+    driver.channels['leaf_soil'] = 3
+    driver.frequency = 'US'
+    frames = (Path(__file__).parent / 'fixtures/issue24.txt').read_text().splitlines()
+    packets = [driver._data_to_packet(data) for data in rtl.PacketFactory.create(driver, frames)]
+    assert len(packets) > 60
+    assert sum(packet.get('rain') or 0 for packet in packets) == 0
+
+
+def test_cli_survives_idle_and_drains_both_pipes(tmp_path):
+    script = tmp_path / 'receiver.py'
+    script.write_text("import sys,time\ntime.sleep(1.2)\nprint('stdout')\nprint('stderr',file=sys.stderr)\n")
+    command = f'{shlex.quote(sys.executable)} {shlex.quote(str(script))}'
+    result = subprocess.run([sys.executable, rtl.__file__, '--cmd', command],
+                            capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    assert 'stdout' in result.stdout and 'stderr' in result.stdout

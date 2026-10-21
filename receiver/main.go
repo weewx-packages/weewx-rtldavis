@@ -40,10 +40,10 @@ import (
     "os"
     "os/signal"
     "time"
-    "strconv"
+    "syscall"
     "fmt"
 
-    "github.com/lheijst/rtldavis/protocol"
+    "github.com/weewx-packages/weewx-rtldavis/receiver/protocol"
     "github.com/jpoirier/gortlsdr"
 )
 const maxTr = 8
@@ -106,7 +106,8 @@ var (
     visitCount        int            // number of different active channels seen during init
 
     // msg handling
-    lastRecMsg        string         // string of last received raw code
+    acceptedPackets   packetGate     // last accepted transmission per sender
+    iqFile            string         // optional offline IQ recording
 
     // test
     testFreq          bool
@@ -119,8 +120,8 @@ var (
 )
 
 
-func init() {
-    VERSION := "0.15"
+func configure() {
+    VERSION := "0.16.0"
 var (
     tr      int
     mask    int
@@ -149,7 +150,11 @@ var (
     disableAfc = flag.Bool("noafc", false, "disable any AFC")
     deviceString = flag.String("d","0","device serial number or device index")
 
+    flag.StringVar(&iqFile, "iq", "", "decode an unsigned 8-bit IQ recording at 268800 samples/s")
     flag.Parse()
+    if err := validateOptions(tr, *transmitterFreq, startFreq, endFreq, stepFreq); err != nil {
+        log.Fatal(err)
+    }
     protocol.Verbose = *verbose
 
     log.Printf("rtldavis.go VERSION=%s", VERSION)
@@ -182,24 +187,20 @@ var (
 }
 
 func main() {
-    var sdrIndex int = -1
+    configure()
+    if iqFile != "" {
+        recording, err := os.Open(iqFile)
+        if err != nil { log.Fatal(err) }
+        defer recording.Close()
+        if err := replay(recording, os.Stdout, *transmitterFreq); err != nil { log.Fatal(err) }
+        return
+    }
     p := protocol.NewParser(14, *transmitterFreq)
     p.Cfg.Log()
 
     fs := p.Cfg.SampleRate
 
-    // First attempt to open the device as a Serial Number
-    sdrIndex , _ = rtlsdr.GetIndexBySerial(*deviceString)
-    if (sdrIndex <0 ) {
-        indexreturn,err := strconv.Atoi(*deviceString)
-        if (err != nil) {
-          log.Printf("Could not parse device\n")
-          log.Fatal(err)
-        }
-        sdrIndex = indexreturn
-    }
-
-    dev, err := rtlsdr.Open(0)
+    dev, err := openSelectedDevice(*deviceString, rtlsdr.GetIndexBySerial, rtlsdr.Open)
     if err != nil {
         log.Fatal(err)
     }
@@ -233,7 +234,7 @@ func main() {
             for i := 0; i < len(gains); i++ {
                 gainInfo += fmt.Sprintf("%d Db ", int(gains[i]))
             }
-        log.Printf(gainInfo)
+        log.Print(gainInfo)
         }
         err = dev.SetTunerGain(gain)
         if err != nil {
@@ -300,13 +301,32 @@ func main() {
         out.Close()
         dev.CancelAsync()
         dev.Close()
-        os.Exit(0)
     }()
 
     sig := make(chan os.Signal, 1)
-    signal.Notify(sig, os.Interrupt, os.Kill)
+    signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+    defer signal.Stop(sig)
 
-    block := make([]byte, p.Cfg.BlockSize2)
+    // Keep timer and signal handling responsive while USB input is idle.
+    // ReadFull prevents short reads from appending stale bytes to a new block.
+    blocks := make(chan []byte)
+    readErrors := make(chan error, 1)
+    done := make(chan struct{})
+    defer close(done)
+    go func() {
+        for {
+            block := make([]byte, p.Cfg.BlockSize2)
+            if _, err := io.ReadFull(in, block); err != nil {
+                readErrors <- err
+                return
+            }
+            select {
+            case blocks <- block:
+            case <-done:
+                return
+            }
+        }
+    }()
     initTransmitrs = true
     maxFreq = p.ChannelCount
 
@@ -373,8 +393,10 @@ func main() {
                 }
             }
 
-        default:
-            in.Read(block)
+        case err := <-readErrors:
+            log.Printf("receiver input ended: %v", err)
+            return
+        case block := <-blocks:
             handleNxtPacket = false
             for _, msg := range p.Parse(p.Demodulate(block)) {
                 if testFreq {
@@ -389,14 +411,12 @@ func main() {
                     continue  // read next message
                 }
                 curTime = time.Now().UnixNano()
-                //log.Printf("msg.Data: %02X", msg.Data)
-                // Keep track of duplicate packets
-                seen := string(msg.Data)
-                if seen == lastRecMsg {
-                    log.Printf("duplicate packet: %02X", msg.Data)
-                    continue  // read next message
+                // A second decode can have a different, CRC-valid payload.
+                // Reject it per sender without dropping the next transmission.
+                if !acceptedPackets.accept(msg.ID, time.Now()) {
+                    log.Printf("duplicate burst: %02X", msg.Data)
+                    continue
                 }
-                lastRecMsg = seen
                 // check if msg comes from undefined sensor
                 if msgIdToChan[int(msg.ID)] == 9 {
                     if *undefined {

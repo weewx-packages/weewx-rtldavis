@@ -1,0 +1,37 @@
+# Changes
+
+## 0.21.0
+
+Independent continuation with the Python driver and Go receiver in one repository.
+The receiver reports version 0.16.0. Both original Git histories are retained.
+
+- Decode signed digital temperatures without including sensor flags; recognize
+  both missing-sensor values. Original issues #14 and PRs #19, #23.
+- Limit wind to known message types and the selected transmitter. Preserve calm
+  wind and north-boundary directions. Export the transmitter's reported gust.
+  Original PR #19 and issue #25.
+- Reject repeated RF decodes per sender and unsafe rain counter transitions.
+  Rejected counts do not become the baseline. Original issues #15, #24 and PR #22.
+- Accept low-battery frames and skip bad CRCs without stopping the packet loop.
+  Original issue #20.
+- Populate archive reception percentages, including silent transmitters; handle
+  short intervals and receiver counter resets. Original issues #7, #26.
+- Stop reader threads at binary EOF, drain both pipes and quote command paths.
+  Shutdown reaps only the receiver owned by this driver. Diagnostic mode handles
+  idle output and `--version` returns success. Original issues #7, #9.
+- Build the companion receiver with pinned Go modules. Honor `-d`, retain valid
+  repeated transmissions, validate scan units and decode IQ recordings offline.
+  Original issues #7, #13, #18; receiver PRs #2, #3, #5, #6, #7.
+- Add packet replay, process and synthetic IQ regression tests. Daily checks
+  against WeeWX development are configured in the shared package catalog.
+
+Existing module and installer names remain `user.rtldavis` and `rtldavis`.
+Existing installations can retain their receiver executable, but rebuild it to
+obtain the receiver fixes. Legacy database diagnostic aliases remain unchanged.
+BMP280/BME280 readings need a separate service.
+
+The EU no-decode/repeater report, original issue #21, still needs real IQ samples
+and hardware verification. General elimination of every isolated corrupt reading
+is also unverified. See docs/troubleshooting.md.
+
+Earlier history is recorded in [changelog](changelog).
