@@ -61,6 +61,16 @@ mapping, and [troubleshooting](docs/troubleshooting.md) for USB and reception te
 Existing `[Rtldavis]`, `user.rtldavis` and installer name `rtldavis` remain valid.
 See [changes](CHANGELOG.md) for fixes and migration details.
 
+If the driver was installed from an archive and you now want updates from a
+registered catalog source named `packages`, explicitly switch its source:
+
+```sh
+weectl extension switch-source rtldavis --repo packages --package rtldavis
+```
+
+This installs the selected catalog release and binds future updates to that
+source. It requires a WeeWX build with repository support.
+
 Tests cover recorded problem frames, synthetic IQ, receiver processes and WeeWX
 installation. Live RF reception, including the unresolved EU/repeater report,
 still needs hardware testing. Repeater-specific frame formats are unsupported.
