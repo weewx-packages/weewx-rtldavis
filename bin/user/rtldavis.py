@@ -72,8 +72,7 @@ Run rtld on a thread and push the output onto a queue.
 from __future__ import print_function  # Python 2/3 compatiblity
 from __future__ import with_statement
 
-from subprocess import check_output
-import signal
+import shlex
 from calendar import timegm
 import fnmatch
 import os
@@ -93,6 +92,7 @@ except ImportError:
 import weewx.drivers
 import weewx.engine
 import weewx.units
+import weewx.wxformulas
 from weewx.crc16 import crc16
 from weewx.units import obs_group_dict
 from weeutil.weeutil import tobool
@@ -112,7 +112,7 @@ def logerr(msg):
     log.error(msg)
 
 DRIVER_NAME = 'Rtldavis'
-DRIVER_VERSION = '0.20'
+DRIVER_VERSION = '0.21.0'
 
 weewx.units.obs_group_dict['frequency'] = 'group_frequency'
 weewx.units.USUnits['group_frequency'] = 'hertz'
@@ -136,7 +136,7 @@ if weewx.__version__ < "3":
 # 
 # Call with:  /home/pi/work/bin/rtldavis -tf [transceiver-frequency: US, NZ or EU] -tr [transmitters]} 
 #
-DEFAULT_CMD = '/home/pi/work/bin/rtldavis -tf EU' 
+DEFAULT_CMD = 'rtldavis' 
 DEBUG_RAIN = 0
 DEBUG_PARSE = 0
 DEBUG_RTLD = 0
@@ -190,6 +190,8 @@ def calculate_thermistor_temp(temp_raw):
     # Convert temp_raw to a resistance (R) in kiloOhms
     a = 18.81099
     b = 0.0009988027
+    if temp_raw <= 0:
+        return DEFAULT_SOIL_TEMP
     r = a / (1.0 / temp_raw - b) / 1000 # k ohms
 
     # Steinhart-Hart parameters
@@ -397,106 +399,114 @@ def interpolate(rx0, rx1,
     return y + dy0 + (x - rx0) / float(rx1 - rx0) * (dy1 - dy0)
 
 class AsyncReader(threading.Thread):
+    """Read a binary pipe until EOF without blocking the WeeWX packet loop.
+
+    Args:
+        fd (typing.BinaryIO): Pipe owned by ProcManager.
+        queue (queue.Queue): Destination for complete binary lines.
+        label (str): Thread name for diagnostics.
+    """
 
     def __init__(self, fd, queue, label):
-        threading.Thread.__init__(self)
+        threading.Thread.__init__(self, name=label, daemon=True)
         self._fd = fd
         self._queue = queue
-        self._running = False
-        self.setDaemon(True)
-        self.setName(label)
+        self._running = True
 
     def run(self):
-        logdbg("start async reader for %s" % self.getName())
-        self._running = True
-        for line in iter(self._fd.readline, ''):
-            self._queue.put(line)
+        for line in iter(self._fd.readline, b''):
             if not self._running:
                 break
+            self._queue.put(line)
 
     def stop_running(self):
         self._running = False
 
 
-class ProcManager():
+class ProcManager:
+    """Own one receiver process and drain both pipes independently."""
 
     def __init__(self):
-        self._cmd = None
         self._process = None
         self.stderr_queue = queue.Queue()
-        self.stderr_reader = None
         self.stdout_queue = queue.Queue()
+        self.stderr_reader = None
         self.stdout_reader = None
 
-    def get_pid(self, name):
-        return map(int,check_output(["pidof",name]).split())
-
     def startup(self, cmd, path=None, ld_library_path=None):
-        # kill existiing rtld processes
-        try:
-            pid_list = self.get_pid("rtldavis")
-            for pid in pid_list:
-                os.kill(int(pid), signal.SIGKILL)
-                loginf("rtldavis with pid %s killed" % pid)
-        except:
-            pass
+        """Start the receiver without invoking a shell.
 
-        self._cmd = cmd
-        loginf("startup process '%s'" % self._cmd)
+        Args:
+            cmd (str): Executable and arguments, with shell-style quoting.
+            path (str|None): Optional directories to prepend to PATH.
+            ld_library_path (str|None): Optional shared-library search path.
+        """
         env = os.environ.copy()
         if path:
-            env['PATH'] = path + ':' + env['PATH']
+            env['PATH'] = path + os.pathsep + env.get('PATH', '')
         if ld_library_path:
             env['LD_LIBRARY_PATH'] = ld_library_path
         try:
-            self._process = subprocess.Popen(cmd.split(' '),
-                                             env=env,
+            self._process = subprocess.Popen(shlex.split(cmd), env=env,
                                              stderr=subprocess.PIPE,
                                              stdout=subprocess.PIPE)
             self.stderr_reader = AsyncReader(
-                self._process.stderr, self.stderr_queue, 'stderr-thread')
-            self.stderr_reader.start()
+                self._process.stderr, self.stderr_queue, 'rtldavis-stderr')
             self.stdout_reader = AsyncReader(
-                self._process.stdout, self.stdout_queue, 'stdout-thread')
+                self._process.stdout, self.stdout_queue, 'rtldavis-stdout')
+            self.stderr_reader.start()
             self.stdout_reader.start()
         except (OSError, ValueError) as e:
-            raise weewx.WeeWxIOError("failed to start process: %s" % e)
+            self.shutdown()
+            raise weewx.WeeWxIOError("failed to start receiver: %s" % e)
 
     def shutdown(self):
-        loginf('shutdown process %s' % self._cmd)
-        self.stderr_reader.stop_running()
-        self.stdout_reader.stop_running()
-        # kill existiing rtldavis processes
-        pid_list = self.get_pid("rtldavis")
-        for pid in pid_list:
-            os.kill(int(pid), signal.SIGKILL)
-            loginf("rtldavis with pid %s killed" % pid)
+        """Stop and reap only this station's receiver. Safe to call twice."""
+        if self._process is None:
+            return
+        if self.running():
+            self._process.terminate()
+            try:
+                self._process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+        self._process.wait()
+        for reader in (self.stderr_reader, self.stdout_reader):
+            if reader is not None:
+                reader.join(timeout=3)
+                reader.stop_running()
+        for pipe in (self._process.stderr, self._process.stdout):
+            pipe.close()
 
     def running(self):
-        return self._process.poll() is None
+        return self._process is not None and self._process.poll() is None
+
+    def pending(self):
+        """Return whether stderr can still deliver output after process exit."""
+        return (self.running() or not self.stderr_queue.empty()
+                or self.stderr_reader is not None and self.stderr_reader.is_alive())
 
     def get_stdout(self):
         lines = []
-        while not self.stdout_queue.empty():
-            lines.append(self.stdout_queue.get().decode('utf-8'))
-        return lines
+        while True:
+            try:
+                lines.append(self.stdout_queue.get_nowait().decode('utf-8', errors='replace'))
+            except queue.Empty:
+                return lines
 
     def get_stderr(self):
-        lines = [] 
-        # When a lot rtldavis packets are read, a hangup
-        # will occur regularly, sometimes of more than a minute.
-        # Therefor a maximum run-time of get_stderr of 10 seconds 
-        # is invoked to let genLoopPackets process the yielded lines. 
-        start_time = int(time.time())
-        while self.running() and int(time.time()) - start_time < 10:
-            try:             
-                line = self.stderr_queue.get(True, 10).decode('utf-8')
-                lines.append(line) 
-                yield lines
-                lines = []
+        """Yield at most one second of output, including an empty idle batch.
+
+        Yields:
+            list[str]: Receiver lines. Empty batches let the caller check its watchdog.
+        """
+        deadline = time.monotonic() + 1
+        while self.pending() and time.monotonic() < deadline:
+            try:
+                line = self.stderr_queue.get(timeout=.1)
+                yield [line.decode('utf-8', errors='replace')]
             except queue.Empty:
-                yield lines
-                lines = []
+                yield []
 
 
 class Packet:
@@ -510,31 +520,46 @@ class Packet:
 
 
 class DATAPacket(Packet):
-    IDENTIFIER = re.compile("^\d\d:\d\d:\d\d.[\d]{6} [0-9A-F][0-7][0-9A-F]{14}")
-    PATTERN = re.compile('([0-9A-F]{2})([0-9A-F]{2})([0-9A-F]{2})([0-9A-F]{2})([0-9A-F]{2})([0-9A-F]{2})([0-9A-F]{2})([0-9A-F]{2}) ([\d]+) ([\d]+) ([\d]+) ([\d]+)')
+    IDENTIFIER = re.compile(r"^\d{2}:\d{2}:\d{2}\.\d{6} [0-9A-F]{16} ")
+    PATTERN = re.compile(r"^(\d{2}):(\d{2}):(\d{2}\.\d{6}) ([0-9A-F]{16}) (\d+) (\d+) (\d+) (\d+)")
 
     @staticmethod
     def parse_text(self, payload, lines):
-        pkt = dict()
-        m = DATAPacket.PATTERN.search(lines[0])
-        if m:
-            dbg_rtld(2, "data: %s" % lines[0])
-            raw_msg = [0] * 8
-            for i in range(0, 8):
-                raw_msg[i] = chr(int(m.group(i + 1), 16))
-            PacketFactory._check_crc(raw_msg)
-            for i in range(0, 8):
-                raw_msg[i] = m.group(i + 1)
-            raw_pkt = bytearray([int(i, base=16) for i in raw_msg])
-            pkt = self.parse_raw(self, raw_pkt)
-            for i in range(0, 4):
-                pkt['curr_cnt%d' % i] = int(m.group(i + 9))
-            dbg_rtld(3, "data_pkt: %s" % pkt)
-            lines.pop(0)
-            return pkt
-        else:
-            dbg_rtld(1, "DATAPacket: unrecognized data: '%s'" % lines[0])
-            lines.pop(0)
+        """Decode a CRC-valid frame, rejecting repeated RF decodes per sender.
+
+        Args:
+            self (RtldavisDriver): Driver with transmitter and timing state.
+            payload (str): Receiver line without surrounding whitespace.
+            lines (list[str]): Pending lines; consumes its first entry.
+
+        Returns:
+            dict|None: Decoded observations, or None for an invalid or repeated frame.
+        """
+        lines.pop(0)
+        match = DATAPacket.PATTERN.match(payload)
+        if not match:
+            return None
+        raw_pkt = bytes.fromhex(match.group(4))
+        if crc16(raw_pkt):
+            logdbg("discarding frame with invalid CRC: %s" % payload)
+            return None
+        stamp = int(match.group(1)) * 3600 + int(match.group(2)) * 60 + float(match.group(3))
+        channel = (raw_pkt[0] & 7) + 1
+        previous = self._last_frame_time.get(channel)
+        # The receiver stamps frames before pipe buffering. Host receipt times
+        # would discard valid frames when a buffered batch reaches WeeWX.
+        # An ISS needs at least 2.5625 s between transmissions. The 2 s guard
+        # rejects secondary decodes of the same RF burst, even with a valid CRC.
+        if previous is not None and (stamp - previous) % 86400 < 2:
+            logdbg("discarding repeated RF burst from channel %d" % channel)
+            return None
+        data = self.parse_readings(raw_pkt)
+        if not data:
+            return None
+        self._last_frame_time[channel] = stamp
+        for i in range(4):
+            data['curr_cnt%d' % i] = int(match.group(i + 5))
+        return data
 
 
 class CHANNELPacket(Packet):
@@ -642,7 +667,7 @@ class RtldavisConfigurationEditor(weewx.drivers.AbstractConfEditor):
 [Rtldavis]
     # This section is for the rtldavis sdr-rtl USB receiver.
 
-    cmd = /home/pi/work/bin/rtldavis [options]
+    cmd = /usr/local/bin/rtldavis
     # Options:
     # -ppm = frequency correction of rtl dongle in ppm; default = 0
     # -gain = tuner gain in tenths of Db; default = 0 means "auto gain"
@@ -694,6 +719,7 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
         'pressure': 'pressure',
         'inTemp': 'temp_in',  # temperature of optional BMP280 module
         'windSpeed': 'wind_speed',
+        'windGust': 'wind_gust',
         'windDir': 'wind_dir',
         'outTemp': 'temperature',
         'outHumidity': 'humidity',
@@ -771,6 +797,8 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
         loginf('sensor map is: %s' % self.sensor_map)
         self._init_stats()
         self.last_rain_count = None
+        self._rain_candidate = None
+        self._last_frame_time = {}
         self._log_humidity_raw = tobool(stn_dict.get('log_humidity_raw', False))
         self._save_pct_good_per_transmitter = tobool(stn_dict.get('save_pct_good_per_transmitter', False))
         self._sensor_map = stn_dict.get('sensor_map', {})
@@ -821,16 +849,14 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
     @staticmethod
     def ch_to_xmit(self, iss_channel, anemometer_channel, leaf_soil_channel,
                    temp_hum_1_channel, temp_hum_2_channel):
+        selected = (iss_channel, anemometer_channel, leaf_soil_channel,
+                    temp_hum_1_channel, temp_hum_2_channel)
+        if not 1 <= iss_channel <= 8 or any(not 0 <= c <= 8 for c in selected):
+            raise ValueError("ISS channel must be 1-8; optional channels must be 0-8")
         transmitters = 0
-        transmitters += 1 << (iss_channel - 1)
-        if anemometer_channel != 0:
-            transmitters += 1 << (anemometer_channel - 1)
-        if leaf_soil_channel != 0:
-            transmitters += 1 << (leaf_soil_channel - 1)
-        if temp_hum_1_channel != 0:
-            transmitters += 1 << (temp_hum_1_channel - 1)
-        if temp_hum_2_channel != 0:
-            transmitters += 1 << (temp_hum_2_channel - 1)
+        for channel in selected:
+            if channel:
+                transmitters |= 1 << (channel - 1)
         # program main.go reports the current msg count for the first 4 active transmitters
         # table self.stats['activeTrIds'] contain the transmitter ID's (range 0-7) of
         # the active transmitters.
@@ -851,22 +877,21 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
         for k in self.sensor_map:
             if self.sensor_map[k] in data:
                 packet[k] = data[self.sensor_map[k]]
-        # convert the rain count to a rain delta measure
         if 'rain_count' in data:
-            if self.last_rain_count is not None:
-                rain_count = data['rain_count'] - self.last_rain_count
+            current = data['rain_count']
+            tips = 0 if self.last_rain_count is None else (current - self.last_rain_count) % 128
+            # A corrupt count must not become the next baseline: that would
+            # turn its recovery into a second, equally false rain event.
+            # A repeated rejected count establishes a new baseline after a
+            # transmitter reset, without counting the ambiguous transition.
+            if tips <= 60 or current == self._rain_candidate:
+                packet['rain'] = (tips if tips <= 60 else 0) * self.rain_per_tip
+                self.last_rain_count = current
+                self._rain_candidate = None
             else:
-                rain_count = 0
-            # handle rain counter wrap around from 127 to 0
-            if rain_count < 0:
-                loginf("rain counter wraparound detected rain_count=%s" %
-                       rain_count)
-                rain_count += 128
-            self.last_rain_count = data['rain_count']
-            packet['rain'] = float(rain_count) * self.rain_per_tip
-            if DEBUG_RAIN:
-                logdbg("rain=%s rain_count=%s last_rain_count=%s" %
-                       (packet['rain'], rain_count, self.last_rain_count))
+                packet['rain'] = None
+                self._rain_candidate = current
+                logdbg("rejecting implausible rain counter transition to %d" % current)
         packet['dateTime'] = int(time.time() + 0.5)
         packet['usUnits'] = weewx.METRICWX
         return packet
@@ -903,45 +928,28 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
         self.stats['curr_cnt'][3] = int(curr_cnt3)
 
     def _update_summaries(self):
+        """Calculate reception percentages for the four counters in receiver output."""
         self.stats['curr_ts'] = int(time.time())
-        logdbg("ARCHIVE_STATS: last time: last_cnt[0-3]: %12d %8d %8d %8d %8d" % (self.stats['last_ts'], self.stats['last_cnt'][0], self.stats['last_cnt'][1], self.stats['last_cnt'][2], self.stats['last_cnt'][3]))
-        logdbg("ARCHIVE_STATS: curr time: curr_cnt[0-3]: %12d %8d %8d %8d %8d" % (self.stats['curr_ts'], self.stats['curr_cnt'][0], self.stats['curr_cnt'][1], self.stats['curr_cnt'][2], self.stats['curr_cnt'][3]))
-        # if not the first time since startup
-        if self.stats['last_ts'] > 0:
-            total_count = 0
-            total_missed = 0
-            total_max_count = 0
-            period = self.stats['curr_ts'] - self.stats['last_ts']
-            # do for the first 4 active transmitters
-            # Note: the stats of the 5th and more active transmitters are not calculated.
-            for i in range(0, 4):
-                # if this transmitter is active
-                if self.stats['curr_cnt'][i] > 0:
-                    # y is a pointer to the channel number of the active transmitters (9 means: not-active)
-                    # the loop_time is different for each transmitter
-                    x = self.stats['activeTrIds'][i]
-                    # calculate per transmitter the theoretical maximum number of received message this archive period
-                    self.stats['max_count'][i] = period // self.stats['loop_times'][x]
-                    self.stats['count'][i] = self.stats['curr_cnt'][i] - self.stats['last_cnt'][i]
-                    # test if not init (counters reset to zero)
-                    if self.stats['count'][i] > 0:
-                        self.stats['missed'][i] = self.stats['max_count'][i] - self.stats['count'][i]
-                        self.stats['pct_good'][i] = 100.0 * self.stats['count'][i] / self.stats['max_count'][i]
-                        # calculate the totals for all active transmitters
-                        total_count = total_count + self.stats['count'][i]
-                        total_missed = total_missed + self.stats['missed'][i]
-                        total_max_count = total_max_count + self.stats['max_count'][i]
-            # if there is a total
-            if total_max_count > 0 and self.stats['pct_good_all'] is not None:
-                self.stats['pct_good_all'] = 100.0 * total_count / total_max_count
-                logdbg("ARCHIVE_STATS: total_max_count=%d total_count=%d total_missed=%d  pctGood=%6.2f" % 
-                    (total_max_count, total_count, total_missed, self.stats['pct_good_all']))
-            # log the stats for each active transmitter and no-init-counters
-            for i in range(0, 4):
-                if self.stats['curr_cnt'][i] > 0 and self.stats['count'][i] > 0 and self.stats['pct_good'] is not None:
-                    x = self.stats['activeTrIds'][i]
-                    logdbg("ARCHIVE_STATS: station %d: max_count= %4d count=%4d missed=%4d pct_good=%6.2f" % 
-                        (i+1, self.stats['max_count'][i], self.stats['count'][i], self.stats['missed'][i], self.stats['pct_good'][i]))
+        period = self.stats['curr_ts'] - self.stats['last_ts']
+        if self.stats['last_ts'] <= 0 or period <= 0:
+            return
+        total_count = total_expected = 0
+        for i in range(min(self.tr_count, 4)):
+            expected = int(period // self.stats['loop_times'][self.stats['activeTrIds'][i]])
+            count = self.stats['curr_cnt'][i] - self.stats['last_cnt'][i]
+            # A receiver restart resets cumulative counters. Its partial
+            # interval has no meaningful percentage; start again next archive.
+            if expected <= 0 or count < 0:
+                continue
+            count = min(count, expected)
+            self.stats['count'][i] = count
+            self.stats['max_count'][i] = expected
+            self.stats['missed'][i] = expected - count
+            self.stats['pct_good'][i] = 100.0 * count / expected
+            total_count += count
+            total_expected += expected
+        if total_expected:
+            self.stats['pct_good_all'] = 100.0 * total_count / total_expected
 
     def new_archive_record(self, event):
         logdbg("new_archive_record")
@@ -958,12 +966,12 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
                     data = 'pct_good_%s' % tr
                     for k in self.sensor_map:
                         # Test if sensor is in the sensor map.
-                        if self.sensor_map[k] in data:
+                        if self.sensor_map[k] == data:
                             if tr == 0 and self.tr_count > 1:
                                 # When tr_count = 1 we don't store the pct_good of transmitter 1
                                 # because the value is the same as in rxCheckPercent
                                 event.record[k] = self.stats['pct_good'][tr]
-                            if tr > 0 and tr <= self.tr_count:
+                            if tr > 0 and tr < self.tr_count:
                                 # save pct_good for active transmitters (max=4)
                                 event.record[k] = self.stats['pct_good'][tr]
         self._reset_stats()  # save current stats in last stats
@@ -985,7 +993,7 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
         self.transm_to_store = self.stats['activeTrIds'][rel_transm_to_store]
         dbg_parse(1, "Number of transmitters: %s, store freqError data for transmitter with ID=%s" % (self.tr_count, self.transm_to_store))
         
-        while self._mgr.running():
+        while self._mgr.pending():
             # the stalled timeout must be greater than the init period
             # init period is EU: 16 s, US, AU and NZ: 133 s
             if int(time.time()) - time_last_received > 150:
@@ -994,8 +1002,8 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
             for lines in self._mgr.get_stderr():
                 for data in PacketFactory.create(self, lines):
                     if data:
-                        time_last_received = int(time.time())
                         if 'curr_cnt0' in data:
+                            time_last_received = int(time.time())
                             self._update_stats(data['curr_cnt0'], data['curr_cnt1'], data['curr_cnt2'], data['curr_cnt3'])
                         if data != self._last_pkt:
                             self._last_pkt = data
@@ -1009,12 +1017,11 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
                     elif lines:
                         loginf("missed (unparsed): %s" % lines)
         else:
-            logerr("err: %s" % self._mgr.get_stderr())
             raise weewx.WeeWxIOError("rtldavis process is not running")
 
     def parse_readings(self, pkt):
         data = dict()
-        if not pkt:
+        if not pkt or len(pkt) != 8:
             return data
         try:
             data = self.parse_raw(self, pkt)
@@ -1037,56 +1044,24 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
                 data['bat_th_1'] = battery_low
             else:
                 data['bat_th_2'] = battery_low
-            # Each data packet of iss or anemometer contains wind info,
-            # but it is only valid when received from the channel with
-            # the anemometer connected
-            # message examples:
-            # 51 06 B2 FF 73 00 76 61
-            # E0 00 00 4E 05 00 72 61 (no sensor)
-            wind_speed_raw = pkt[1]
-            wind_dir_raw = pkt[2]
-            if not(wind_speed_raw == 0 and wind_dir_raw == 0):
-                """ The elder Vantage Pro and Pro2 stations measured
-                the wind direction with a potentiometer. This type has
-                a fairly big dead band around the North. The Vantage
-                Vue station uses a hall effect device to measure the
-                wind direction. This type has a much smaller dead band,
-                so there are two different formulas for calculating
-                the wind direction. To be able to select the right
-                formula the Vantage type must be known.
-                For now we use the traditional 'pro' formula for all
-                wind directions.
-                """
-                dbg_parse(2, "wind_speed_raw=%03x wind_dir_raw=0x%03x" %
-                          (wind_speed_raw, wind_dir_raw))
-
-                # Vantage Pro and Pro2
+            message_type = pkt[0] >> 4
+            if (data['channel'] == self.channels['wind_channel']
+                    and message_type in (2, 4, 5, 6, 7, 8, 9, 0xA, 0xE)):
+                wind_speed_raw, wind_dir_raw = pkt[1], pkt[2]
+                # The original Envoy calibration table is retained. Pro/Pro2
+                # direction has a dead band around north, encoded as 0 or 255.
                 if wind_dir_raw == 0:
-                    wind_dir_pro = 5.0
+                    direction = 5.0
                 elif wind_dir_raw == 255:
-                    wind_dir_pro = 355.0
+                    direction = 355.0
                 else:
-                    wind_dir_pro = 9.0 + (wind_dir_raw - 1) * 342.0 / 253.0
+                    direction = 9.0 + (wind_dir_raw - 1) * 342.0 / 253.0
+                corrected = round(calc_wind_speed_ec(wind_speed_raw, wind_dir_raw))
+                data['wind_speed_ec'] = corrected
+                data['wind_speed_raw'] = wind_speed_raw
+                data['wind_speed'] = corrected * MPH_TO_MPS
+                data['wind_dir'] = direction if corrected else None
 
-                    # Vantage Vue
-                    wind_dir_vue = wind_dir_raw * 1.40625 + 0.3
-
-                    # wind error correction is by raw byte values
-                    wind_speed_ec = round(calc_wind_speed_ec(wind_speed_raw, wind_dir_raw))
-
-                    data['wind_speed_ec'] = wind_speed_ec
-                    data['wind_speed_raw'] = wind_speed_raw
-                    data['wind_dir'] = wind_dir_pro
-                    data['wind_speed'] = wind_speed_ec * MPH_TO_MPS
-                    dbg_parse(2, "WS=%s WD=%s WS_raw=%s WS_ec=%s WD_raw=%s WD_pro=%s WD_vue=%s" %
-                              (data['wind_speed'], data['wind_dir'],
-                               wind_speed_raw, wind_speed_ec,
-                               wind_dir_raw if wind_dir_raw <= 180 else 360 - wind_dir_raw,
-                               wind_dir_pro, wind_dir_vue))
-
-            # data from both iss sensors and extra sensors on
-            # Anemometer Transport Kit
-            message_type = (pkt[0] >> 4 & 0xF)
             if message_type == 2:
                 # supercap voltage (Vue only) max: 0x3FF (1023)
                 # message example:
@@ -1139,6 +1114,8 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
                         # no rain
                         rain_rate = 0
                         dbg_parse(3, "no_rain=%s mm/h" % rain_rate)
+                    elif time_between_tips_raw == 0:
+                        pass  # Zero cannot describe a finite interval between tips.
                     elif pkt[4] & 0x40 == 0:
                         # heavy rain. typical value:
                         # 64/16 - 1020/16 = 4 - 63.8 (180.0 - 11.1 mm/h)
@@ -1185,9 +1162,13 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
                 # 81 00 00 59 45 00 A3 E6 (analog temp)
                 # 81 00 DB FF C3 00 AB F8 (no sensor)
                 temp_raw = (pkt[3] << 4) + (pkt[4] >> 4)  # 12-bits temp value
-                if temp_raw != 0xFFC:
+                if temp_raw not in (0xFFC, 0xFF8):
                     if pkt[4] & 0x8:
                         # digital temp sensor
+                        # The 12-bit value is signed; the low nibble contains
+                        # sensor flags and is not part of the temperature.
+                        if temp_raw & 0x800:
+                            temp_raw -= 0x1000
                         temp_f = temp_raw / 10.0
                         temp_c = weewx.wxformulas.FtoC(temp_f) # C
                         dbg_parse(2, "digital temp_raw=0x%03x temp_f=%s temp_c=%s"
@@ -1214,8 +1195,8 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
                 if not(gust_raw == 0 and gust_index_raw == 0):
                     dbg_parse(2, "W10=%s gust_index_raw=%s" %
                               (gust_raw, gust_index_raw))
-                    # don't store the 10-min gust data because there is no
-                    # field for it reserved in the standard wview schema
+                    if data['channel'] == self.channels['wind_channel']:
+                        data['wind_gust'] = gust_raw * MPH_TO_MPS
             elif message_type == 0xA:
                 # outside humidity
                 # message examples:
@@ -1270,7 +1251,7 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
                 others wrap around at 255.  When we filter the highest
                 bit, both counter types will wrap at 127.
                 """
-                if rain_count_raw != 0x80:
+                if rain_count_raw != 0x80 and data['channel'] == self.channels['iss']:
                     rain_count = rain_count_raw & 0x7F  # skip high bit
                     data['rain_count'] = rain_count
                     dbg_parse(2, "rain_count_raw=0x%02x value=%s" %
@@ -1337,7 +1318,8 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
 
         else:
             logerr("unknown station with channel: %s, raw message: %s" %
-                   (data['channel'], raw))
+                   (data['channel'], pkt.hex()))
+            return {}
         return data
 
     @staticmethod
@@ -1391,25 +1373,26 @@ Actions:
     (options, args) = parser.parse_args()
 
     if options.version:
-        print("sdr driver version %s" % DRIVER_VERSION)
-        exit(1)
+        print("rtldavis driver version %s" % DRIVER_VERSION)
+        exit(0)
 
     if options.debug:
         weewx.debug = 1
 
-    if options.action == 'show-packets':
-        # display output and parsed/unparsed packets
-        mgr = ProcManager()
+    if options.action != 'show-packets':
+        parser.error("unknown action %s" % options.action)
+    mgr = ProcManager()
+    try:
         mgr.startup(options.cmd, path=options.path,
                     ld_library_path=options.ld_library_path)
-        while mgr.running():
+        while mgr.pending():
             for lines in mgr.get_stderr():
-                payload = lines[0].strip()
-                if payload:
-                    print(payload)
-                lines.pop(0)
-            for lines in mgr.get_stdout():
-                err = lines[0].strip()
-                if err:
-                    print(err)
-                lines.pop(0)
+                for line in lines:
+                    print(line.rstrip(), flush=True)
+            for line in mgr.get_stdout():
+                print(line.rstrip(), flush=True)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        mgr.shutdown()
+    exit(mgr._process.returncode if mgr._process else 1)
