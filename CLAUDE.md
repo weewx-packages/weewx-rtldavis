@@ -23,3 +23,5 @@ Independent continuation of lheijst/weewx-rtldavis; preserve GPL notices and aut
 Use four spaces and existing WeeWX naming. New Python docstrings use Google style
 with types in the docstring, without runtime annotations. Keep hardware claims
 separate from recorded-packet and simulated-process tests.
+
+README follows the weewx-packages schema and names no versions or archive URLs; installation links to the catalog page.
