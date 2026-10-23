@@ -1,5 +1,12 @@
 # Changes
 
+## 0.21.2
+
+- Restructure the README around installation from the catalog.
+- Document migration of existing driver installations to the catalog.
+- State in the configuration reference that `sensor_map` entries are merged
+  into the built-in mapping.
+
 ## 0.21.1
 
 - Compare DSP floating-point results with a numerical tolerance on ARM64.
