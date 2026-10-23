@@ -4,7 +4,7 @@ Options belong in `[Rtldavis]` in `weewx.conf`.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `driver` | `user.rtldavis` | WeeWX driver module. |
+| `driver` | | Must be `user.rtldavis`. |
 | `cmd` | `rtldavis` | Receiver executable and optional arguments. Shell quoting is supported; shell operators are not executed. |
 | `path` | unset | Directories prepended to the receiver's `PATH`. |
 | `ld_library_path` | unset | Receiver shared-library path. |
@@ -17,7 +17,7 @@ Options belong in `[Rtldavis]` in `weewx.conf`.
 | `debug_parse`, `debug_rain`, `debug_rtld` | `0` | Parser detail level 0–3, rain debug messages, receiver detail level 0–3. WeeWX debug logging must also be enabled. |
 | `save_pct_good_per_transmitter` | `False` | Archive reception percentages for up to four active transmitters. |
 | `log_humidity_raw` | `False` | Log changes in the unconverted humidity value. |
-| `sensor_map` | built-in mapping | Nested mapping from WeeWX field names to decoded observations. |
+| `sensor_map` | built-in mapping | Nested mapping from WeeWX field names to decoded observations. Entries are merged into the built-in mapping. |
 
 The configuration editor supplies an absolute executable path and enables receiver
 detail level 2. The table lists fallback values when an option is absent.
