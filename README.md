@@ -8,7 +8,8 @@ This is an independent continuation of
 [lheijst/weewx-rtldavis](https://github.com/lheijst/weewx-rtldavis) and
 [lheijst/rtldavis](https://github.com/lheijst/rtldavis).
 Both histories and original GPL notices are preserved. The Python driver and Go
-receiver now share this repository. Report problems in
+receiver now share this repository. The catalog release is 0.21.1. Report problems
+in
 [this issue tracker](https://github.com/weewx-packages/weewx-rtldavis/issues).
 
 ## Install
@@ -33,8 +34,9 @@ weectl extension install https://github.com/weewx-packages/weewx-rtldavis/releas
 weectl station reconfigure --driver=user.rtldavis
 ```
 
-If you already use the [package catalog](https://github.com/weewx-packages/catalog),
-`weectl extension install rtldavis` selects the catalog release.
+Stock WeeWX 5 accepts the fixed archive URL above or a downloaded archive.
+Use `--config=/path/to/weewx.conf` on both commands to target a specific station.
+No catalog integration is needed.
 Building the Go receiver remains a separate step; extension installation updates
 the Python driver. Rebuild the receiver when its release notes require it.
 
@@ -61,15 +63,10 @@ mapping, and [troubleshooting](docs/troubleshooting.md) for USB and reception te
 Existing `[Rtldavis]`, `user.rtldavis` and installer name `rtldavis` remain valid.
 See [changes](CHANGELOG.md) for fixes and migration details.
 
-If the driver was installed from an archive and you now want updates from a
-registered catalog source named `packages`, explicitly switch its source:
-
-```sh
-weectl extension switch-source rtldavis --repo packages --package rtldavis
-```
-
-This installs the selected catalog release and binds future updates to that
-source. It requires a WeeWX build with repository support.
+Back up the station configuration and stop WeeWX before an update. Repeat the
+archive installation above with the intended release URL, review configuration,
+and start WeeWX again. The installer does not restart the service. Stock WeeWX
+5.5.2 has no package-ID install, extension update or source-switch command.
 
 Tests cover recorded problem frames, synthetic IQ, receiver processes and WeeWX
 installation. Live RF reception, including the unresolved EU/repeater report,
@@ -84,3 +81,5 @@ checks catalog releases against WeeWX's current `master` and `development` daily
 
 GPL-3.0-or-later. Original authors include Matthew Wall, Luc Heijst and Douglas
 Hall. See [credits](docs/credits.md) and [license](license).
+
+<!-- Documentation updated 2026-10-23 by weewx-packages. -->
