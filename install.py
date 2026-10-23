@@ -10,7 +10,7 @@ def loader():
 class RtldavisInstaller(ExtensionInstaller):
     def __init__(self):
         super(RtldavisInstaller, self).__init__(
-            version="0.21.1",
+            version="0.21.2",
             name='rtldavis',
             description='Receive Davis wireless weather data with RTL-SDR',
             author="Matthew Wall, Luc Heijst, weewx-packages",
