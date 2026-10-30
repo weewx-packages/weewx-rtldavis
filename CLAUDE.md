@@ -5,18 +5,19 @@ Independent continuation of lheijst/weewx-rtldavis; preserve GPL notices and aut
 
 ## Checks
 
-- `python -m pytest -q`: packet and process regressions, about 3 seconds.
-- `cd receiver && go test -race ./...`: receiver and synthetic IQ checks.
+- `python -m pytest -q`: packet regressions and simulated transmitters, about 3 seconds.
+  Needs WeeWX, numpy and pytest.
 - `python tools/package.py`: build the versioned extension archive.
 - Hardware reception and repeater formats need separate verification.
 
 ## Structure
 
-- `bin/user/rtldavis.py`: WeeWX driver and receiver diagnostics.
+- `bin/user/rtldavis.py`: WeeWX driver, configuration prompts and the diagnostic command.
+- `bin/user/rtldavis_receiver.py`: hop schedule, frequency search, librtlsdr binding.
+- `bin/user/rtldavis_dsp.py`: numpy demodulator. Imported only when numpy is present.
 - `install.py`: WeeWX extension installer.
-- `receiver/`: Go decoder, DSP and native USB receiver.
 - `docs/`: Configuration, troubleshooting and provenance.
-- `tests/`: Recorded-packet and simulated-process regressions.
+- `tests/`: Recorded-packet regressions and simulated transmitters.
 
 ## Conventions
 

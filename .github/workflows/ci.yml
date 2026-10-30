@@ -20,23 +20,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: python -m pip install pytest 'weewx==${{ matrix.weewx }}'
+      - run: python -m pip install pytest numpy 'weewx==${{ matrix.weewx }}'
       - run: python -m pytest -q
       - run: python tools/package.py
-  receiver:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        go: ['1.23.x', '1.27.x']
-        os: [ubuntu-latest, ubuntu-24.04-arm]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: ${{ matrix.go }}
-          cache-dependency-path: receiver/go.sum
-      - run: sudo apt-get update -qq && sudo apt-get install -y librtlsdr-dev
-      - run: go test -race ./...
-        working-directory: receiver
-      - run: go build -o ../dist/rtldavis .
-        working-directory: receiver

@@ -22,7 +22,7 @@ See the original threads for their contributors and disclosures.
 public log attached to original issue #24. Tests also reproduce the CRC-valid
 frame pairs published in original issue #15.
 
-The receiver uses jpoirier/gortlsdr under its BSD license, resolved at the version
-in `receiver/go.mod`. `receiver/dsp/search.go` derives from the Go standard
-library; its BSD license is included in `receiver/dsp/LICENSE`. The remaining
-project code is GPL-3.0-or-later unless a file states otherwise.
+The receiver in `bin/user/rtldavis_receiver.py` and `bin/user/rtldavis_dsp.py`
+is a Python port of that Go receiver: the demodulator, the frequency tables
+and the hop schedule. The Go sources remain in the Git history up to release
+0.21.2. The project code is GPL-3.0-or-later unless a file states otherwise.
