@@ -17,14 +17,16 @@ Python. Report problems in [this issue tracker](https://github.com/weewx-package
   installed from its package:
 
   ```sh
-  sudo apt install python3-numpy librtlsdr0
+  sudo apt install python3-numpy rtl-sdr
   ```
 
   With a pip installation of WeeWX, install numpy into its virtual environment
   instead, for example `~/weewx-venv/bin/pip install numpy`, and librtlsdr with
-  `sudo apt install librtlsdr0`.
+  `sudo apt install rtl-sdr`.
 
-librtlsdr0 brings the udev rule that gives the `plugdev` group access to the
+`rtl-sdr` pulls in the librtlsdr package of the distribution, `librtlsdr0` or
+`librtlsdr2` on Ubuntu 24.04, and adds tools such as `rtl_test`. The library
+package brings the udev rule that gives the `plugdev` group access to the
 dongle. The DVB-T kernel driver needs no blacklist; librtlsdr releases the
 dongle from it.
 
@@ -87,7 +89,7 @@ explains the log messages and how to test reception without WeeWX.
 - In the EU band, a dongle reading more than about 90 kHz (100 ppm) low is
   taken for the next channel. Reception then works for four of five channels.
   Set `ppm` to the dongle's error to avoid this.
-- librtlsdr0 0.6.0 in Debian bookworm, and in Raspberry Pi OS based on it,
+- librtlsdr 0.6.0 in Debian bookworm, and in Raspberry Pi OS based on it,
   does not support the RTL-SDR Blog V4. Use a system based on Debian trixie,
   or another dongle.
 - Repeater frame formats are not supported. The original EU no-decode report
