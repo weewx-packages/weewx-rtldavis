@@ -1,6 +1,6 @@
 # Changes
 
-## Unreleased
+## 0.22.2 (2026-10-30)
 
 - Name `rtl-sdr` as the package to install. Ubuntu 24.04 calls the library
   package `librtlsdr2`, so `librtlsdr0` cannot be installed there.
