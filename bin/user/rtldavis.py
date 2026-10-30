@@ -719,10 +719,10 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
         data = self.parse_readings(frame.payload)
         if not data:
             return None
-        packet = self._data_to_packet(data)
         if self.frequency == 'EU' and frame.transmitter == self.transm_to_store:
-            packet['freqError%d' % frame.channel] = int(round(frame.frequency_offset))
-        return packet
+            # Mapped like the observations, to the legacy fields by default.
+            data['freqError%d' % frame.channel] = int(round(frame.frequency_offset))
+        return self._data_to_packet(data)
 
     def parse_readings(self, pkt):
         """Decode one eight-byte payload, without its receiver timestamp or CRC check.

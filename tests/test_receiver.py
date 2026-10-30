@@ -1,6 +1,8 @@
 # Copyright (c) 2026 Manuel Hilgert <hilman2@gmail.com>
 """Receiver checks against simulated transmitters, without SDR hardware."""
 import math
+import threading
+import time
 
 import numpy
 import pytest
@@ -126,11 +128,73 @@ def test_second_decode_of_a_burst_is_ignored():
     # Both CRC-valid frames from original issue #15 arrived 262 microseconds apart.
     rx = receiver.Receiver('EU', [0])
     rx.start(0.0)
+    tuning = (rx.channel, rx.frequency)
     first = dsp.Candidate(0, bytes.fromhex('E003BE730300E26A'), 0.0)
     second = dsp.Candidate(70, bytes.fromhex('E0019E310300E26A'), 0.0)
-    assert rx._accept(first, 10.0) is not None
-    assert rx._accept(second, 10.000262) is None
-    assert rx._accept(dsp.Candidate(0, bytes.fromhex('E001BE730300A6E9'), 0.0), 30.5)
+    assert rx._accept(first, 10.0, *tuning) is not None
+    assert rx._accept(second, 10.000262, *tuning) is None
+    assert rx._accept(dsp.Candidate(0, bytes.fromhex('E001BE730300A6E9'), 0.0), 30.5, *tuning)
+
+
+def test_unconfigured_transmitter_does_not_lock_the_frequency():
+    rx = receiver.Receiver('EU', [0])
+    rx.start(0.0)
+    rx._accept(dsp.Candidate(0, payload(1, 0), 30000.0), 1.0, rx.channel, rx.frequency)
+    assert not rx.locked
+    assert rx.learned == {}
+
+
+def test_lost_lock_forgets_learned_offsets():
+    rx = receiver.Receiver('EU', [0])
+    rx.start(0.0)
+    rx._accept(dsp.Candidate(0, payload(0, 0), 5000.0), 1.0, rx.channel, rx.frequency)
+    rx._synchronize(2.0)
+    for period in range(receiver.LOST_LOCK_PERIODS):
+        rx._timeout(rx._deadline)
+    assert not rx.locked
+    assert rx.learned == {}
+
+
+class PreparedDemodulator:
+    """Returns prepared candidates, one list per block."""
+
+    def __init__(self, batches):
+        self.batches = batches
+        self.sample_count = 0
+        self.settled = 0
+
+    def feed(self, raw, shifts):
+        self.sample_count += len(raw) // 2
+        self.settled = self.sample_count
+        return self.batches.pop(0) if self.batches else []
+
+
+def test_frames_of_one_block_keep_the_channel_they_were_sampled_on():
+    rx = receiver.Receiver('EU', [0, 1, 2])
+    rx.start(0.0)
+    channel = rx.channel
+    burst = lambda transmitter, index: dsp.Candidate(index, payload(transmitter, 1), 0.0)
+    rx._demodulator = PreparedDemodulator([
+        [burst(0, 100), burst(1, 3000)],
+        # Transmitter 2 completes the synchronization and retunes the
+        # receiver before transmitter 0's second frame is handled.
+        [burst(2, 8300), burst(0, 12000)]])
+    frames = rx.feed(bytes(2 * BLOCK), BLOCK / FS)
+    frames += rx.feed(bytes(2 * BLOCK), 5.0)
+    assert rx.channel != channel
+    assert [frame.channel for frame in frames] == [channel] * 4
+
+
+def test_replay_returns_a_frame_at_the_end_of_a_recording(tmp_path):
+    data = payload(0, 3)
+    deviation = numpy.concatenate((numpy.zeros(1000), burst(data), numpy.zeros(100)))
+    phase = numpy.cumsum(2 * math.pi * (deviation - FS / 4) / FS)
+    raw = numpy.empty(2 * len(phase), dtype=numpy.uint8)
+    raw[0::2] = numpy.round(127.4 + 60 * numpy.cos(phase))
+    raw[1::2] = numpy.round(127.4 + 60 * numpy.sin(phase))
+    recording = tmp_path / 'capture.cu8'
+    recording.write_bytes(raw.tobytes())
+    assert [candidate.payload for candidate in receiver.replay(str(recording))] == [data]
 
 
 def test_demodulator_rejects_corrupt_frame():
@@ -166,6 +230,9 @@ class EmptyAsyncDongle:
     def cancel(self):
         self.cancelled = True
 
+    def close(self):
+        self.closed = True
+
     def stream(self, receive, synchronous=False):
         self.modes.append(synchronous)
         self.cancelled = False
@@ -184,3 +251,33 @@ def test_radio_reads_synchronously_after_empty_blocks():
     dongle = EmptyAsyncDongle(radio)
     radio._run_dongle(dongle)
     assert dongle.modes == [False, True]
+    assert dongle.closed
+
+
+class StuckReadDongle(EmptyAsyncDongle):
+    """A synchronous read that cancel() cannot end, like librtlsdr's."""
+
+    def __init__(self, radio):
+        EmptyAsyncDongle.__init__(self, radio)
+        self.release = threading.Event()
+        self.closed = False
+
+    def stream(self, receive, synchronous=False):
+        self.radio._stopping.set()
+        self.release.wait(5)
+        assert not self.closed
+        return 0
+
+
+def test_dongle_is_not_closed_during_a_read():
+    radio = receiver.Radio(receiver.Receiver('EU', [0]))
+    radio.USB_JOIN = 0.1
+    dongle = StuckReadDongle(radio)
+    radio._run_dongle(dongle)
+    assert not dongle.closed
+    dongle.release.set()
+    for _ in range(50):
+        if dongle.closed:
+            break
+        time.sleep(0.02)
+    assert dongle.closed

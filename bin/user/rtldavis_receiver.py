@@ -202,6 +202,7 @@ class Receiver:
         self._demodulator = dsp.Demodulator()
         self._accepted = {}
         self._empty_periods = 0
+        self._tunings = []
         self._synchronize(now)
 
     def feed(self, raw, end_time):
@@ -214,12 +215,22 @@ class Receiver:
         Returns:
             list[Frame]: Frames from configured transmitters, in time order.
         """
+        # The dongle is retuned after each call, so this block was sampled at
+        # the tuning in effect now. A burst can be returned a block after it
+        # was sampled, and one frame can retune before the next is handled, so
+        # each frame looks up the tuning in effect at its own first sample.
+        if not self._tunings or self._tunings[-1][1:] != (self.channel, self.frequency):
+            self._tunings.append((self._demodulator.sample_count, self.channel, self.frequency))
+            del self._tunings[:-8]
         candidates = self._demodulator.feed(raw, self.shifts)
         end_index = self._demodulator.sample_count
         frames = []
         for candidate in candidates:
             frame_time = end_time - (end_index - candidate.index) / SAMPLE_RATE
-            frame = self._accept(candidate, frame_time)
+            channel, frequency = next(
+                ((channel, frequency) for index, channel, frequency in reversed(self._tunings)
+                 if index <= candidate.index), self._tunings[0][1:])
+            frame = self._accept(candidate, frame_time, channel, frequency)
             if frame is not None:
                 frames.append(frame)
         # The demodulator returns a burst a few milliseconds after it ends. A
@@ -230,8 +241,15 @@ class Receiver:
             self._timeout(self._deadline)
         return frames
 
-    def _accept(self, candidate, now):
-        """Apply one decoded frame to the schedule; return a Frame or None."""
+    def _accept(self, candidate, now, channel, frequency):
+        """Apply one decoded frame to the schedule; return a Frame or None.
+
+        Args:
+            candidate (user.rtldavis_dsp.Candidate): The decoded frame.
+            now (float): Time of its sync word.
+            channel (int): Index of the channel it was received on.
+            frequency (int): Frequency in Hz the dongle was tuned to.
+        """
         transmitter = candidate.payload[0] & 7
         previous = self._accepted.get(transmitter)
         # A noisy burst can decode twice, even with two different CRC-valid
@@ -240,12 +258,14 @@ class Receiver:
             log.debug("ignoring second decode of a burst: %s", candidate.payload.hex())
             return None
         self._accepted[transmitter] = now
-        self._heard = True
-        offset = self._learn(transmitter, self.frequency - self.frequencies[self.channel]
-                             + candidate.frequency_error)
+        # Another station's transmitter may be off by a different amount, and
+        # its frames would keep the search from moving on.
         if transmitter not in self.index:
             self._report_unconfigured(transmitter)
             return None
+        self._heard = True
+        offset = self._learn(transmitter, channel,
+                             frequency - self.frequencies[channel] + candidate.frequency_error)
         i = self.index[transmitter]
         self.counts[i] += 1
         self._missed[i] = 0
@@ -253,7 +273,7 @@ class Receiver:
         if self._syncing:
             if self._last_visit[i] is None:
                 log.info("Receiving transmitter on channel %d", transmitter + 1)
-                self._last_hop[i] = self.sequence_of[self.channel]
+                self._last_hop[i] = self.sequence_of[channel]
                 self._last_visit[i] = now
                 if all(visit is not None for visit in self._last_visit):
                     if len(self.transmitters) > 1:
@@ -263,37 +283,38 @@ class Receiver:
             else:
                 self._last_visit[i] = now
         else:
-            self._last_hop[i] = self.sequence_of[self.channel]
+            self._last_hop[i] = self.sequence_of[channel]
             self._last_visit[i] = now
             self._check_probation(now, hit=True)
             hop = True
         frame = Frame(transmitter, candidate.payload, now, tuple(self.counts),
-                      self.channel, offset, candidate.frequency_error)
+                      channel, offset, candidate.frequency_error)
         log.debug("frame %s from channel %d on %d Hz, error %+.0f Hz",
                   candidate.payload.hex(), transmitter + 1,
-                  self.frequency, candidate.frequency_error)
+                  frequency, candidate.frequency_error)
         if hop:
             self._hop_next(now)
         return frame
 
-    def _learn(self, transmitter, offset):
+    def _learn(self, transmitter, channel, offset):
         """Record a measured offset from the band table and return the learned one.
 
         Args:
             transmitter (int): Zero-based ID of the sender.
+            channel (int): Index of the channel it was received on.
             offset (float): Carrier minus table frequency in Hz, as measured.
 
         Returns:
             float: The offset now used for this transmitter on this channel.
         """
-        key = (transmitter, self.channel)
+        key = (transmitter, channel)
         if not self.locked:
             self.locked = True
             self._probation = [0, 0]
             self.offset = offset
             log.info("Found a Davis transmitter %+.1f kHz (%+.0f ppm) from the table "
                      "frequency. The receiver corrects this automatically.",
-                     offset / 1000, offset / self.frequencies[self.channel] * 1e6)
+                     offset / 1000, offset / self.frequencies[channel] * 1e6)
         if key in self.learned:
             self.learned[key] += CORRECTION_GAIN * (offset - self.learned[key])
         else:
@@ -396,6 +417,7 @@ class Receiver:
                     log.info("No Davis transmitter heard for %.0f s, searching the "
                              "frequency again", self._empty_periods * self.sync_period)
                     self.locked = False
+                    self.learned.clear()
                     self.search_base = self.offset
                     self.search_step = 0
                     self._empty_periods = 0
@@ -656,6 +678,8 @@ class Radio(threading.Thread):
     # do not use these buffers. After this many all-zero blocks in a row, the
     # radio switches to them; a real dongle never delivers a zero block.
     EMPTY_BLOCKS = 3
+    # Seconds to wait for the USB thread after cancelling.
+    USB_JOIN = 5
 
     def __init__(self, receiver, device='0', gain=None):
         threading.Thread.__init__(self, name='rtldavis-radio', daemon=True)
@@ -685,7 +709,6 @@ class Radio(threading.Thread):
                 except OSError as e:
                     log.error("RTL-SDR error: %s. Reconnecting.", e)
                 finally:
-                    self._dongle.close()
                     self._dongle = None
                 if not self._stopping.is_set():
                     self._stopping.wait(self.RETRY)
@@ -703,9 +726,16 @@ class Radio(threading.Thread):
             self._problem = (message, time.monotonic())
 
     def _run_dongle(self, dongle):
+        """Stream from an open dongle until stopped or USB fails, then close it."""
         blocks = queue.Queue(maxsize=100)
         dropped = [0]
         empty = [0]
+        result = []
+        # A synchronous read cannot be cancelled. If one is still running when
+        # streaming ends, the USB thread closes the dongle once the read
+        # returns, never this thread while the read still uses it.
+        lock = threading.Lock()
+        usb_state = {'running': False, 'close': False}
 
         def receive(data, arrival):
             if not data.strip(b'\0'):
@@ -719,50 +749,68 @@ class Radio(threading.Thread):
             except queue.Full:
                 dropped[0] += 1
 
-        dongle.configure(self.gain)
-        self.receiver.start(time.monotonic())
-        tuned = self.receiver.frequency
-        dongle.tune(tuned)
-        while True:
-            result = []
-            usb = threading.Thread(
-                target=lambda: result.append(dongle.stream(receive, self._synchronous)),
-                name='rtldavis-usb', daemon=True)
-            usb.start()
+        def stream():
             try:
-                while usb.is_alive() or not blocks.empty():
-                    if self._stopping.is_set():
-                        break
-                    try:
-                        data, arrival = blocks.get(timeout=1)
-                    except queue.Empty:
-                        continue
-                    for frame in self.receiver.feed(data, arrival):
-                        self.frames.put(frame)
-                    if self.receiver.frequency != tuned:
-                        tuned = self.receiver.frequency
-                        try:
-                            dongle.tune(tuned)
-                        except OSError as e:
-                            # The next hop retunes anyway; one failure is not fatal.
-                            log.warning("%s", e)
-                    if dropped[0]:
-                        log.warning("Processing fell behind; %d sample blocks lost", dropped[0])
-                        dropped[0] = 0
+                result.append(dongle.stream(receive, self._synchronous))
             finally:
-                dongle.cancel()
-                usb.join(5)
-            if self._stopping.is_set():
+                with lock:
+                    usb_state['running'] = False
+                    if usb_state['close']:
+                        dongle.close()
+
+        try:
+            dongle.configure(self.gain)
+            self.receiver.start(time.monotonic())
+            tuned = self.receiver.frequency
+            dongle.tune(tuned)
+            while True:
+                del result[:]
+                with lock:
+                    usb_state['running'] = True
+                usb = threading.Thread(target=stream, name='rtldavis-usb', daemon=True)
+                usb.start()
+                try:
+                    while usb.is_alive() or not blocks.empty():
+                        if self._stopping.is_set():
+                            break
+                        try:
+                            data, arrival = blocks.get(timeout=1)
+                        except queue.Empty:
+                            continue
+                        for frame in self.receiver.feed(data, arrival):
+                            self.frames.put(frame)
+                        if self.receiver.frequency != tuned:
+                            tuned = self.receiver.frequency
+                            try:
+                                dongle.tune(tuned)
+                            except OSError as e:
+                                # The next hop retunes anyway; one failure is not fatal.
+                                log.warning("%s", e)
+                        if dropped[0]:
+                            log.warning("Processing fell behind; %d sample blocks lost",
+                                        dropped[0])
+                            dropped[0] = 0
+                finally:
+                    dongle.cancel()
+                    usb.join(self.USB_JOIN)
+                if self._stopping.is_set() or usb.is_alive():
+                    return
+                if empty[0] >= self.EMPTY_BLOCKS and not self._synchronous:
+                    log.warning("librtlsdr delivers empty sample blocks, a known fault of "
+                                "librtlsdr 0.6.0 on ARM. Reading synchronously instead.")
+                    self._synchronous = True
+                    empty[0] = 0
+                    continue
+                log.error("The RTL-SDR dongle stopped delivering samples (result %s). "
+                          "Reconnecting.", result[0] if result else 'unknown')
                 return
-            if empty[0] >= self.EMPTY_BLOCKS and not self._synchronous:
-                log.warning("librtlsdr delivers empty sample blocks, a known fault of "
-                            "librtlsdr 0.6.0 on ARM. Reading synchronously instead.")
-                self._synchronous = True
-                empty[0] = 0
-                continue
-            log.error("The RTL-SDR dongle stopped delivering samples (result %s). "
-                      "Reconnecting.", result[0] if result else 'unknown')
-            return
+        finally:
+            with lock:
+                if usb_state['running']:
+                    log.error("A USB read did not end. The dongle is closed when it does.")
+                    usb_state['close'] = True
+                else:
+                    dongle.close()
 
     def stop(self):
         """Stop streaming and wait for the thread. Safe to call more than once."""
@@ -787,6 +835,8 @@ def replay(path):
         while True:
             block = recording.read(16384)
             if len(block) < 2:
-                return
+                break
             for candidate in demodulator.feed(block[:len(block) // 2 * 2], WIDE_SHIFTS):
                 yield candidate
+    for candidate in demodulator.flush():
+        yield candidate

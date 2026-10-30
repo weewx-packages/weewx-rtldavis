@@ -162,9 +162,10 @@ def test_frame_counts_reach_archive_statistics(driver):
     packet = driver._frame_to_packet(frame)
     assert driver.stats['curr_cnt'] == [7, 0, 0, 0]
     assert packet['outTemp'] == pytest.approx((59.3 - 32) * 5 / 9)
-    assert 'freqError2' not in packet
+    assert 'hailRate' not in packet
     driver.transm_to_store = 0
-    assert driver._frame_to_packet(frame)['freqError2'] == -1234
+    # freqError2 reaches the database through its legacy field.
+    assert driver._frame_to_packet(frame)['hailRate'] == -1234
 
 
 @pytest.mark.parametrize('message', [0, 1, 0xB, 0xD, 0xF])
