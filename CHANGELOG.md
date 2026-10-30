@@ -1,6 +1,6 @@
 # Changes
 
-## Unreleased
+## 0.22.1 (2026-10-30)
 
 - Attribute each frame to the channel it was received on, also when one
   sample block holds several frames and the first one retunes the receiver.
