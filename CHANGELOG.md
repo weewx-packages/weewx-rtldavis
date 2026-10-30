@@ -1,6 +1,6 @@
 # Changes
 
-## Unreleased
+## 0.22.0 (2026-10-30)
 
 The receiver runs inside WeeWX. The separate Go program, its build and the
 `cmd`, `path` and `ld_library_path` options are gone. numpy and librtlsdr are
