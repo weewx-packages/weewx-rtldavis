@@ -14,7 +14,7 @@ journalctl -u weewx -f
 | `librtlsdr is missing. Install it with: …` | As above. |
 | `No RTL-SDR dongle found.` | Plug in the dongle. The receiver opens it as soon as it appears. |
 | `No permission to open the RTL-SDR dongle. Add user … to the plugdev group …` | Run the `usermod` command shown, then restart WeeWX. Group changes apply only to newly started programs. |
-| `No permission … Install librtlsdr0, which provides the udev rule …` | The udev rule is missing. Install librtlsdr0, then reconnect the dongle. |
+| `No permission … Install rtl-sdr, whose library package provides the udev rule …` | The udev rule is missing. Install rtl-sdr, then reconnect the dongle. |
 | `The RTL-SDR dongle is in use.` | Another program holds the dongle, or the DVB-T kernel driver does. The message shows how to release it. |
 | `librtlsdr delivers empty sample blocks …` | librtlsdr 0.6.0 on ARM returned zeroed samples. The receiver reads synchronously from then on; nothing to do. |
 | `Searching for transmitter(s) on channel … (step n of 5)` | Normal at startup. Each step tries another tuning offset. |

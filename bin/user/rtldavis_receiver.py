@@ -479,7 +479,7 @@ class RtlSdr:
                 if name:
                     raise Problem("librtlsdr is installed but cannot be loaded: %s" % e)
                 raise Problem("librtlsdr is missing. Install it with: sudo apt install "
-                              "librtlsdr0 (Fedora: rtl-sdr, Arch: rtl-sdr)")
+                              "rtl-sdr (Fedora and Arch: rtl-sdr as well)")
             pointer = ctypes.c_void_p
             library.rtlsdr_get_device_count.restype = ctypes.c_uint32
             library.rtlsdr_get_device_name.restype = ctypes.c_char_p
@@ -612,8 +612,8 @@ def _open_failure(result):
             return ("No permission to open the RTL-SDR dongle. Add user %s to the "
                     "plugdev group, then restart WeeWX: sudo usermod -aG plugdev %s"
                     % (user, user))
-        return ("No permission to open the RTL-SDR dongle. Install librtlsdr0, which "
-                "provides the udev rule, then unplug and reconnect the dongle.")
+        return ("No permission to open the RTL-SDR dongle. Install rtl-sdr, whose library "
+                "package provides the udev rule, then unplug and reconnect the dongle.")
     if result == -6:
         return ("The RTL-SDR dongle is in use. Stop other programs using it, such as "
                 "rtl_tcp, rtl_433 or a second WeeWX. If no other program runs, the DVB "
