@@ -15,5 +15,7 @@ class RtldavisInstaller(ExtensionInstaller):
             description='Receive Davis wireless weather data with RTL-SDR',
             author="Matthew Wall, Luc Heijst, weewx-packages",
             author_email="",
-            files=[('bin/user', ['bin/user/rtldavis.py'])]
+            files=[('bin/user', ['bin/user/rtldavis.py',
+                                 'bin/user/rtldavis_receiver.py',
+                                 'bin/user/rtldavis_dsp.py'])]
         )

@@ -1,5 +1,28 @@
 # Changes
 
+## Unreleased
+
+The receiver runs inside WeeWX. The separate Go program, its build and the
+`cmd`, `path` and `ld_library_path` options are gone. numpy and librtlsdr are
+now required; see the README.
+
+- Search for the dongle's frequency error at startup, then correct the tuning
+  per transmitter and channel from every frame. The Go receiver measured this
+  error 1024 samples after the sync word, mostly after the frame.
+- Decode frames up to about 20 kHz off frequency, and frames at a lower signal
+  level than before.
+- Let one burst decode once: the payload most decodes agree on wins. Discard
+  frames of eight zero bytes and frames with a message type no transmitter
+  sends.
+- Wait for a missing dongle, library or permission and log how to fix it,
+  instead of stopping WeeWX.
+- Log a transmitter on an unconfigured channel, with the setting to use.
+- Ask for band, ISS channel and rain bucket in `weectl station reconfigure`.
+- Add `device`, `gain` and `ppm`, and `--check` for the diagnostic command.
+- Store the EU frequency offsets in the observation packet, not a packet of
+  their own.
+- Remove the string comparison of the WeeWX version. Issue #6.
+
 ## 0.21.2
 
 - Restructure the README around installation from the catalog.

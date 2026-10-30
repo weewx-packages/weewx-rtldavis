@@ -6,4 +6,3 @@ __pycache__/
 .coverage
 htmlcov/
 dist/
-/receiver/rtldavis

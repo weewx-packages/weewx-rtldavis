@@ -2,27 +2,31 @@
 
 Receive Davis Vantage Pro, Pro2 and Vue observations with an RTL-SDR USB dongle.
 The driver supports EU, US and NZ frequency plans, separate wind transmitters,
-and leaf/soil and temperature/humidity stations. It needs the companion Go
-receiver `rtldavis`, which the extension does not install.
+and leaf/soil and temperature/humidity stations. The receiver runs inside WeeWX
+and finds the dongle's frequency error by itself.
 
 This is an independent continuation of
-[lheijst/weewx-rtldavis](https://github.com/lheijst/weewx-rtldavis) and
-[lheijst/rtldavis](https://github.com/lheijst/rtldavis). The Python driver and
-the Go receiver share this repository, with both Git histories. Report problems
-in [this issue tracker](https://github.com/weewx-packages/weewx-rtldavis/issues).
+[lheijst/weewx-rtldavis](https://github.com/lheijst/weewx-rtldavis), with the
+Go receiver of [lheijst/rtldavis](https://github.com/lheijst/rtldavis) ported to
+Python. Report problems in [this issue tracker](https://github.com/weewx-packages/weewx-rtldavis/issues).
 
 ## Requirements
 
 - Linux, a Davis wireless station and an RTL-SDR dongle.
-- For the receiver: Go 1.23 or later, a C compiler and the librtlsdr headers.
+- numpy and librtlsdr. On Debian, Ubuntu or Raspberry Pi OS with WeeWX
+  installed from its package:
 
-On Debian or Raspberry Pi OS:
+  ```sh
+  sudo apt install python3-numpy librtlsdr0
+  ```
 
-```sh
-sudo apt install git golang-go build-essential librtlsdr-dev rtl-sdr
-```
+  With a pip installation of WeeWX, install numpy into its virtual environment
+  instead, for example `~/weewx-venv/bin/pip install numpy`, and librtlsdr with
+  `sudo apt install librtlsdr0`.
 
-No Python packages are needed beyond WeeWX.
+librtlsdr0 brings the udev rule that gives the `plugdev` group access to the
+dongle. The DVB-T kernel driver needs no blacklist; librtlsdr releases the
+dongle from it.
 
 ## Installation
 
@@ -30,67 +34,74 @@ Install `rtldavis` from the [WeeWX packages catalog](https://github.com/weewx-pa
 The catalog page lists the current release, its WeeWX and Python
 requirements, and the install, update and removal commands.
 
-The extension installs only the Python driver. Build the receiver from the tag
-of the same release, for example `v<version>`:
+Then select the driver. It asks for the frequency band, the ISS channel and
+the rain bucket:
 
 ```sh
-git clone https://github.com/weewx-packages/weewx-rtldavis.git
-cd weewx-rtldavis
-git checkout v<version>
-(cd receiver && go build -o ../dist/rtldavis .)
-sudo install -m 755 dist/rtldavis /usr/local/bin/rtldavis
+weectl station reconfigure --driver=user.rtldavis
 ```
 
-After an update, rebuild the receiver when the [changelog](CHANGELOG.md) says
-so. Then select the driver and restart WeeWX, here for a systemd installation:
+Let the WeeWX service user open the dongle, then restart WeeWX. For a package
+installation the user is `weewx`; for a pip installation it is the user that
+runs WeeWX:
 
 ```sh
-weectl station reconfigure --driver=user.rtldavis --config=/path/to/weewx.conf
+sudo usermod -aG plugdev weewx
 sudo systemctl restart weewx
+```
+
+Plug in the dongle. The log shows the frequency search, the frequency error
+found and each transmitter once it is received:
+
+```sh
+journalctl -u weewx -f
 ```
 
 ## Configuration
 
-Edit `[Rtldavis]` in your station's `weewx.conf`:
+`weectl station reconfigure` writes the `[Rtldavis]` section:
 
 ```ini
 [Rtldavis]
     driver = user.rtldavis
-    cmd = /usr/local/bin/rtldavis
     transceiver_frequency = EU
     iss_channel = 1
     rain_bucket_type = 1
 ```
 
-Set the frequency plan and the ISS channel to match your station. Bucket type
-`1` means 0.2 mm per tip, `0` means 0.01 inch.
-
+Bucket type `1` means 0.2 mm per tip, `0` means 0.01 inch. Additional
+transmitters, the dongle, its gain and the sensor map are optional.
 The [configuration reference](docs/configuration.md) lists every option with
-its default, the observations, additional transmitters and the sensor map.
-[Troubleshooting](docs/troubleshooting.md) covers USB access, reception tests
-and IQ replay.
+its default and the observations. [Troubleshooting](docs/troubleshooting.md)
+explains the log messages and how to test reception without WeeWX.
 
 ## Limitations
 
-- Tests cover recorded problem frames, synthetic IQ, receiver processes and
-  WeeWX installation. Live RF reception has not been tested on real hardware.
-- The original EU no-decode report with a repeater is unresolved.
-  Repeater-specific frame formats are not supported.
+- Tests cover recorded problem frames and simulated transmitters with
+  frequency errors. The librtlsdr binding and the installation into WeeWX were
+  checked against a stand-in library that plays recorded samples. Live RF
+  reception has not been tested on real hardware.
+- The first observations can take a while. Each of the five steps of the
+  frequency search lasts 18 seconds in the EU band and 136 seconds in the US
+  and NZ bands for an ISS on channel 1, up to 21 and 159 seconds on channel 8.
+- In the EU band, a dongle reading more than about 90 kHz (100 ppm) low is
+  taken for the next channel. Reception then works for four of five channels.
+  Set `ppm` to the dongle's error to avoid this.
+- Repeater frame formats are not supported. The original EU no-decode report
+  with a repeater is unresolved.
 - The driver reads no I2C sensor. A BMP280 or BME280 needs its own WeeWX
   service.
 
 ## Development
 
-Install WeeWX and pytest in a virtual environment, then run:
+Install WeeWX, numpy and pytest in a virtual environment, then run:
 
 ```sh
 python -m pytest -q
-(cd receiver && go test -race ./...)
 python tools/package.py
 ```
 
-The receiver tests need the native build dependencies. `tools/package.py` builds
-the extension archive in `dist/`. The catalog's
+`tools/package.py` builds the extension archive in `dist/`. The catalog's
 [compatibility workflow](https://github.com/weewx-packages/catalog/actions)
 tests catalog releases against WeeWX `master` and `development` once a week.
 
