@@ -1,5 +1,17 @@
 # Changes
 
+## Unreleased
+
+- Attribute each frame to the channel it was received on, also when one
+  sample block holds several frames and the first one retunes the receiver.
+- Close the dongle only after a running USB read has returned.
+- Leave unconfigured transmitters out of the frequency search. They could hold
+  it at an offset where the configured transmitter is not received.
+- Forget the learned frequency offsets when the frequency is searched again.
+- Store the EU frequency offsets in their mapped database fields again. 0.22.0
+  added them under their unmapped names.
+- Return a frame at the very end of a recording in `--iq` replay.
+
 ## 0.22.0 (2026-10-30)
 
 The receiver runs inside WeeWX. The separate Go program, its build and the
