@@ -474,6 +474,8 @@ class RtlSdr:
             library.rtlsdr_read_async.argtypes = [pointer, cls._CALLBACK, pointer,
                                                   ctypes.c_uint32, ctypes.c_uint32]
             library.rtlsdr_cancel_async.argtypes = [pointer]
+            library.rtlsdr_read_sync.argtypes = [pointer, ctypes.c_void_p, ctypes.c_int,
+                                                 ctypes.POINTER(ctypes.c_int)]
             cls._library = library
         return cls._library
 
@@ -531,29 +533,45 @@ class RtlSdr:
         self._check(self._library.rtlsdr_set_center_freq(self._device, frequency),
                     'tune to %d Hz' % frequency)
 
-    def stream(self, receive):
+    def stream(self, receive, synchronous=False):
         """Call receive(data, time) for each USB block until cancel() or an error.
 
-        Blocks the calling thread. librtlsdr calls back from this thread.
+        Blocks the calling thread, which also makes the calls to receive.
 
         Args:
             receive (Callable[[bytes, float], None]): Called as
                 ``receive(data, time)`` with a block of IQ bytes and the
                 time.monotonic() at which it arrived.
+            synchronous (bool): True to read one block at a time instead of
+                keeping several USB transfers queued. Default is False.
 
         Returns:
             int: librtlsdr's result; nonzero after a USB error.
         """
+        self._check(self._library.rtlsdr_reset_buffer(self._device), 'reset the buffer')
+        self._cancelled = False
+        if synchronous:
+            block = ctypes.create_string_buffer(16384)
+            length = ctypes.c_int()
+            while not self._cancelled:
+                result = self._library.rtlsdr_read_sync(self._device, block, len(block),
+                                                        ctypes.byref(length))
+                if result < 0:
+                    return result
+                receive(block.raw[:length.value], time.monotonic())
+            return 0
+
         def callback(buffer, length, context):
             receive(ctypes.string_at(buffer, length), time.monotonic())
 
         self._callback = self._CALLBACK(callback)
-        self._check(self._library.rtlsdr_reset_buffer(self._device), 'reset the buffer')
         # 8 transfers of 30 ms let processing pause for 240 ms without losing
         # samples. librtlsdr needs the length in multiples of 512 bytes.
         return self._library.rtlsdr_read_async(self._device, self._callback, None, 8, 16384)
 
     def cancel(self):
+        """End stream(). Safe to call from receive and from another thread."""
+        self._cancelled = True
         self._library.rtlsdr_cancel_async(self._device)
 
     def close(self):
@@ -631,6 +649,13 @@ class Radio(threading.Thread):
 
     RETRY = 15
     REPEAT_PROBLEM = 600
+    # librtlsdr 0.6.0-4, which Debian bookworm and Raspberry Pi OS based on it
+    # ship, queues its USB transfers in buffers mapped with mmap. On ARM, a
+    # kernel fault can leave these buffers zeroed, and librtlsdr's check for the
+    # fault misses it most of the time (Debian bug #1041701). Synchronous reads
+    # do not use these buffers. After this many all-zero blocks in a row, the
+    # radio switches to them; a real dongle never delivers a zero block.
+    EMPTY_BLOCKS = 3
 
     def __init__(self, receiver, device='0', gain=None):
         threading.Thread.__init__(self, name='rtldavis-radio', daemon=True)
@@ -642,6 +667,7 @@ class Radio(threading.Thread):
         self._stopping = threading.Event()
         self._dongle = None
         self._problem = (None, 0)
+        self._synchronous = False
 
     def run(self):
         try:
@@ -679,8 +705,15 @@ class Radio(threading.Thread):
     def _run_dongle(self, dongle):
         blocks = queue.Queue(maxsize=100)
         dropped = [0]
+        empty = [0]
 
         def receive(data, arrival):
+            if not data.strip(b'\0'):
+                empty[0] += 1
+                if empty[0] >= self.EMPTY_BLOCKS and not self._synchronous:
+                    dongle.cancel()
+                return
+            empty[0] = 0
             try:
                 blocks.put_nowait((data, arrival))
             except queue.Full:
@@ -690,36 +723,46 @@ class Radio(threading.Thread):
         self.receiver.start(time.monotonic())
         tuned = self.receiver.frequency
         dongle.tune(tuned)
-        result = []
-        usb = threading.Thread(target=lambda: result.append(dongle.stream(receive)),
-                               name='rtldavis-usb', daemon=True)
-        usb.start()
-        try:
-            while usb.is_alive() or not blocks.empty():
-                if self._stopping.is_set():
-                    break
-                try:
-                    data, arrival = blocks.get(timeout=1)
-                except queue.Empty:
-                    continue
-                for frame in self.receiver.feed(data, arrival):
-                    self.frames.put(frame)
-                if self.receiver.frequency != tuned:
-                    tuned = self.receiver.frequency
+        while True:
+            result = []
+            usb = threading.Thread(
+                target=lambda: result.append(dongle.stream(receive, self._synchronous)),
+                name='rtldavis-usb', daemon=True)
+            usb.start()
+            try:
+                while usb.is_alive() or not blocks.empty():
+                    if self._stopping.is_set():
+                        break
                     try:
-                        dongle.tune(tuned)
-                    except OSError as e:
-                        # The next hop retunes anyway; one failure is not fatal.
-                        log.warning("%s", e)
-                if dropped[0]:
-                    log.warning("Processing fell behind; %d sample blocks lost", dropped[0])
-                    dropped[0] = 0
-        finally:
-            dongle.cancel()
-            usb.join(5)
-        if not self._stopping.is_set():
+                        data, arrival = blocks.get(timeout=1)
+                    except queue.Empty:
+                        continue
+                    for frame in self.receiver.feed(data, arrival):
+                        self.frames.put(frame)
+                    if self.receiver.frequency != tuned:
+                        tuned = self.receiver.frequency
+                        try:
+                            dongle.tune(tuned)
+                        except OSError as e:
+                            # The next hop retunes anyway; one failure is not fatal.
+                            log.warning("%s", e)
+                    if dropped[0]:
+                        log.warning("Processing fell behind; %d sample blocks lost", dropped[0])
+                        dropped[0] = 0
+            finally:
+                dongle.cancel()
+                usb.join(5)
+            if self._stopping.is_set():
+                return
+            if empty[0] >= self.EMPTY_BLOCKS and not self._synchronous:
+                log.warning("librtlsdr delivers empty sample blocks, a known fault of "
+                            "librtlsdr 0.6.0 on ARM. Reading synchronously instead.")
+                self._synchronous = True
+                empty[0] = 0
+                continue
             log.error("The RTL-SDR dongle stopped delivering samples (result %s). "
                       "Reconnecting.", result[0] if result else 'unknown')
+            return
 
     def stop(self):
         """Stop streaming and wait for the thread. Safe to call more than once."""
