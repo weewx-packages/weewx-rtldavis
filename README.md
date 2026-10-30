@@ -87,6 +87,9 @@ explains the log messages and how to test reception without WeeWX.
 - In the EU band, a dongle reading more than about 90 kHz (100 ppm) low is
   taken for the next channel. Reception then works for four of five channels.
   Set `ppm` to the dongle's error to avoid this.
+- librtlsdr0 0.6.0 in Debian bookworm, and in Raspberry Pi OS based on it,
+  does not support the RTL-SDR Blog V4. Use a system based on Debian trixie,
+  or another dongle.
 - Repeater frame formats are not supported. The original EU no-decode report
   with a repeater is unresolved.
 - The driver reads no I2C sensor. A BMP280 or BME280 needs its own WeeWX

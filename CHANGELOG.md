@@ -22,6 +22,10 @@ now required; see the README.
 - Store the EU frequency offsets in the observation packet, not a packet of
   their own.
 - Remove the string comparison of the WeeWX version. Issue #6.
+- Read synchronously when librtlsdr delivers zeroed sample blocks. librtlsdr
+  0.6.0 in Debian bookworm does this on ARM (Debian bug #1041701).
+- Name the missing RTL-SDR Blog V4 support of Debian bookworm's librtlsdr in
+  the README.
 
 ## 0.21.2
 

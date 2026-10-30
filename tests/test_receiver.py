@@ -148,3 +148,39 @@ def test_demodulator_rejects_corrupt_frame():
         assert [candidate.payload for candidate in found] == expected
     # Symbols all on one side of the threshold decode to zero bytes, whose CRC is 0.
     assert dsp._decode(numpy.ones(dsp.FRAME_SYMBOLS), [0.0]) is None
+
+
+class EmptyAsyncDongle:
+    """Stands in for librtlsdr 0.6.0 on ARM: queued transfers arrive zeroed."""
+
+    def __init__(self, radio):
+        self.radio = radio
+        self.modes = []
+
+    def configure(self, gain):
+        pass
+
+    def tune(self, frequency):
+        pass
+
+    def cancel(self):
+        self.cancelled = True
+
+    def stream(self, receive, synchronous=False):
+        self.modes.append(synchronous)
+        self.cancelled = False
+        block = b'\0' * 16384 if not synchronous else bytes([127, 128]) * 8192
+        for _ in range(10):
+            if self.cancelled:
+                break
+            receive(block, 0.0)
+        if synchronous:
+            self.radio._stopping.set()
+        return 0
+
+
+def test_radio_reads_synchronously_after_empty_blocks():
+    radio = receiver.Radio(receiver.Receiver('EU', [0]))
+    dongle = EmptyAsyncDongle(radio)
+    radio._run_dongle(dongle)
+    assert dongle.modes == [False, True]
