@@ -1,6 +1,6 @@
 # Changes
 
-## Unreleased
+## 0.23.0 (2026-11-17)
 
 - Add the sixteenths of a mph that newer transmitters send with the wind
   speed. Older transmitters still report whole mph. Wind direction is
