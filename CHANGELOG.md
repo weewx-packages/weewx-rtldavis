@@ -1,5 +1,11 @@
 # Changes
 
+## Unreleased
+
+- Add the sixteenths of a mph that newer transmitters send with the wind
+  speed. Older transmitters still report whole mph. Wind direction is
+  reported for any speed above 0.
+
 ## 0.22.2 (2026-10-30)
 
 - Name `rtl-sdr` as the package to install. Ubuntu 24.04 calls the library

@@ -778,10 +778,25 @@ class RtldavisDriver(weewx.drivers.AbstractDevice, weewx.engine.StdService):
                 else:
                     direction = 9.0 + (wind_dir_raw - 1) * 342.0 / 253.0
                 corrected = round(calc_wind_speed_ec(wind_speed_raw, wind_dir_raw))
+                # Newer transmitters add sixteenths of a mph to the whole mph
+                # in pkt[1], in a nibble that older ones leave at zero: the
+                # high nibble of pkt[4] in message 9, whose pkt[5] holds the
+                # gust index, and the low nibble of pkt[5] in all other
+                # messages. Found by comparing with a Vantage Vue console, see
+                # https://groups.google.com/g/weewx-user/c/4qz18nXTFQY.
+                # Rounding the corrected speed keeps older transmitters at
+                # their former values; the fraction is added afterwards so it
+                # is not rounded away.
+                if message_type == 9:
+                    wind_fraction = (pkt[4] >> 4) / 16.0
+                else:
+                    wind_fraction = (pkt[5] & 0x0F) / 16.0
+                wind_speed = corrected + wind_fraction
                 data['wind_speed_ec'] = corrected
                 data['wind_speed_raw'] = wind_speed_raw
-                data['wind_speed'] = corrected * MPH_TO_MPS
-                data['wind_dir'] = direction if corrected else None
+                data['wind_speed_fraction'] = wind_fraction
+                data['wind_speed'] = wind_speed * MPH_TO_MPS
+                data['wind_dir'] = direction if wind_speed else None
 
             if message_type == 2:
                 # supercap voltage (Vue only) max: 0x3FF (1023)
