@@ -18,6 +18,10 @@ plus the receiver retransmission PR #7; and the receiver device-selection PRs
 proposals. Implementations here include additional regression checks and fixes.
 See the original threads for their contributors and disclosures.
 
+Danny Ciarniello found the
+[wind speed fraction](https://groups.google.com/g/weewx-user/c/4qz18nXTFQY)
+newer Vantage Vue transmitters send.
+
 `tests/fixtures/issue24.txt` contains only receiver frame lines extracted from the
 public log attached to original issue #24. Tests also reproduce the CRC-valid
 frame pairs published in original issue #15.

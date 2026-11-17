@@ -62,6 +62,29 @@ def test_calm_wind_clears_last_speed(driver):
     assert data['wind_dir'] is None
 
 
+@pytest.mark.parametrize('message', [8, 0xA, 0xE])
+def test_wind_fraction_in_low_nibble_of_byte_5(driver, message):
+    raw = bytearray(frame_bytes(message=message, speed=0)); raw[5] = 0x08
+    data = driver.parse_readings(raw)
+    assert data['wind_speed'] == pytest.approx(0.5 * rtl.MPH_TO_MPS)
+    assert data['wind_dir'] == pytest.approx(180.675889)
+
+
+def test_wind_fraction_in_gust_message(driver):
+    raw = bytearray(frame_bytes(message=9, speed=3)); raw[4] = 0xC3; raw[5] = 0x48
+    assert driver.parse_readings(raw)['wind_speed'] == pytest.approx(3.75 * rtl.MPH_TO_MPS)
+
+
+def test_recorded_calm_frames_carry_no_fraction(driver):
+    # Every frame in this recording reports 0 mph, while the low nibble of
+    # byte 4 and, in message 9, of byte 5 are set.
+    driver.channels['iss'] = driver.channels['wind_channel'] = 2
+    lines = (Path(__file__).parent / 'fixtures/issue24.txt').read_text().splitlines()
+    payloads = [bytes.fromhex(line.split()[1]) for line in lines if line.strip()]
+    speeds = {driver.parse_readings(payload).get('wind_speed') for payload in payloads}
+    assert speeds == {0, None}
+
+
 def test_wind_only_from_selected_transmitter(driver):
     driver.channels['anemometer'] = driver.channels['wind_channel'] = 2
     assert 'wind_speed' not in driver.parse_readings(frame_bytes(channel=1, speed=30))

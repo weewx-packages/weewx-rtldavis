@@ -42,6 +42,8 @@ own frequency correction.
 Standard output includes temperature, humidity, wind speed/direction, transmitter
 reported gust, rain, rain rate, radiation, UV and transmitter battery status.
 Rain comes only from `iss_channel`, wind only from the selected wind transmitter.
+Wind speed has a resolution of 1/16 mph from transmitters that send it, such
+as newer Vantage Vue ISS, and of 1 mph from the others.
 `windGust` is the ISS's stored peak, whose reporting window is defined by the
 transmitter. Its direction is unavailable. WeeWX still aggregates LOOP wind
 samples for archive records.
